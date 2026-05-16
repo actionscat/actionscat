@@ -1,30 +1,12 @@
 package main
 
 import (
-	"actionscat/internal/api"
 	"actionscat/internal/matcher"
 	"fmt"
-	"log"
-	"net/http"
-	"os"
 )
 
 func main() {
 	m := matcher.NewSimpleEngine()
-
-	// 注册bilibili规则
-	addr := os.Getenv("ACTIONSCAT_ADDR")
-	if addr == "" {
-		addr = ":8080"
-	}
-
-	router := api.NewRouter()
-
-	log.Printf("ActionsCat core listening on %s", addr)
-
-	if err := http.ListenAndServe(addr, router); err != nil {
-		log.Fatalf("server stopped: %v", err)
-	}
 
 	// 测试匹配
 	testUrls := []string{
