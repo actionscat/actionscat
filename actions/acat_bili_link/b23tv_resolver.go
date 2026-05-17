@@ -11,17 +11,6 @@ var (
 	b23Regex = regexp.MustCompile(`https?://b23\.tv/[a-zA-Z0-9]+`)
 )
 
-type ParseRequest struct {
-	URL string `json:"url" binding:"required"`
-}
-
-type ParseResponse struct {
-	Code    int    `json:"code"`
-	Bvid    string `json:"bvid"`
-	Message string `json:"message"`
-	Data    *VideoDetail
-}
-
 // ========== 核心逻辑函数 ==========
 
 // resolveB23 展开 b23.tv 短链（当遇到 302 时，不自动跟随跳转，而是返回当前响应）
