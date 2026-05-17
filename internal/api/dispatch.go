@@ -70,7 +70,7 @@ func DispatchHandler(c *gin.Context) {
 	}
 
 	// exec action logic
-	_, err := executor(req.RawMsg)
+	result, err := executor(req.RawMsg)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, DispatchResponse{
 			OK: false, Error: &ResponseError{Code: "ERR_EXEC_FAILED", Message: err.Error()},
@@ -78,9 +78,16 @@ func DispatchHandler(c *gin.Context) {
 		return
 	}
 
+	// 转换结果
+	var messages []ResponseMessage
+	if msgs, ok := result.([]ResponseMessage); ok {
+		messages = msgs
+	}
+
 	// compose result to frontend
 	c.JSON(http.StatusOK, DispatchResponse{
-		OK:     true,
-		Action: matchResult.ActionName,
+		OK:       true,
+		Action:   matchResult.ActionName,
+		Messages: messages,
 	})
 }
