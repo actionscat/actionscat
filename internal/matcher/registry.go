@@ -46,7 +46,7 @@ func (e *SimpleEngine) RegisterRule(rule *Rule) error {
 	return nil
 }
 
-func NewURLRule(name string, actionName string, domains ...string) (*Rule, error) {
+func NewRule(name string, actionName string, domains ...string) (*Rule, error) {
 	if len(domains) == 0 {
 		return nil, fmt.Errorf("domains list cannot be empty for rule %s", name)
 	}
