@@ -46,7 +46,7 @@ func ExecuteBiliLink(rawMsg string) (any, error) {
 	if isShort {
 		bvid = resolveB23(bvid)
 	}
-	log.Printf("[bili_link] 正在解析 B 站链接:", bvid)
+	log.Printf("[bili_link] 正在解析 B 站链接: %s", bvid)
 
 	// 模拟返回
 	return map[string]string{
