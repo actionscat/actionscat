@@ -5,10 +5,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+
+	_ "actionscat/actions/acat_bili_link"
 )
 
 func main() {
-	// 注册bilibili规则
 	addr := os.Getenv("ACTIONSCAT_ADDR")
 	if addr == "" {
 		addr = ":7999"

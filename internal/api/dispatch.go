@@ -1,11 +1,10 @@
 package api
 
 import (
-	"fmt"
+	"actionscat/internal/matcher"
 	"github.com/gin-gonic/gin"
 	"log"
 	"net/http"
-	"regexp"
 )
 
 type AdapterRequest struct {
@@ -53,27 +52,35 @@ func DispatchHandler(c *gin.Context) {
 		req.RawMsg,
 	)
 
-	// assemble resp data
-	var resp DispatchResponse
-
-	// 名为 debug_echo 的 action 触发条件为正则匹配字符串“test”
-	matched, _ := regexp.MatchString(`test`, req.RawMsg)
-	if matched {
-		resp = DispatchResponse{
-			OK:     true,
-			Action: "debug_echo",
-			Messages: []ResponseMessage{
-				{
-					Type: "text",
-					Text: fmt.Sprintf("Actioncat core received msg from %s in group %s", req.SenderQQ, req.CurrentGroup),
-				},
-			},
-		}
-	} else {
-		resp = DispatchResponse{
-			OK: true,
-		}
+	// see if actions triggered
+	matchResult, matched := matcher.GlobalEngine.Match(req.RawMsg)
+	if !matched {
+		c.JSON(http.StatusOK, DispatchResponse{OK: true})
+		return
 	}
 
-	c.JSON(http.StatusOK, resp)
+	// find related executor
+	executor, exists := matcher.GetExecutor(matchResult.ActionName)
+	if !exists {
+		// rule matched but no executor found, this is a config error
+		c.JSON(http.StatusInternalServerError, DispatchResponse{
+			OK: false, Error: &ResponseError{Code: "ERR_NO_EXEC", Message: "executor not found"},
+		})
+		return
+	}
+
+	// exec action logic
+	_, err := executor(req.RawMsg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, DispatchResponse{
+			OK: false, Error: &ResponseError{Code: "ERR_EXEC_FAILED", Message: err.Error()},
+		})
+		return
+	}
+
+	// compose result to frontend
+	c.JSON(http.StatusOK, DispatchResponse{
+		OK:     true,
+		Action: matchResult.ActionName,
+	})
 }
