@@ -1,6 +1,11 @@
 package matcher
 
-import _ "fmt"
+import (
+	"fmt"
+	_ "fmt"
+	"regexp"
+	"strings"
+)
 
 // 1. 全局的匹配引擎
 var GlobalEngine = &SimpleEngine{
@@ -39,4 +44,37 @@ func (e *SimpleEngine) RegisterRule(rule *Rule) error {
 	}
 	e.rules = append(e.rules, rule)
 	return nil
+}
+
+func NewURLRule(name string, actionName string, domains ...string) (*Rule, error) {
+	if len(domains) == 0 {
+		return nil, fmt.Errorf("domains list cannot be empty for rule %s", name)
+	}
+
+	// 1. 自动遍历并转义域名中的特殊字符 (比如把 "." 转义成 "\.")
+	escapedDomains := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		escapedDomains = append(escapedDomains, regexp.QuoteMeta(domain))
+	}
+
+	// 2. 用 "|" 拼接多个域名，形成正则的 OR 逻辑
+	domainPattern := strings.Join(escapedDomains, "|")
+
+	// 3. 构造极具包容性的 URL 正则表达式字符串
+	// 支持带或不带 http(s)://, 带或不带 www., 且匹配后续可能的 URL 路径
+	patternStr := fmt.Sprintf(`(?i)\b(?:https?://)?(?:www\.)?(?:%s)(?:/[^\s]*)?`, domainPattern)
+
+	// 4. 立即执行预编译
+	compiled, err := regexp.Compile(patternStr)
+	if err != nil {
+		return nil, fmt.Errorf("compile rule %s failed: %w", name, err)
+	}
+
+	// 5. 组装并返回引擎所需的 Rule 实体
+	return &Rule{
+		Name:       name,
+		Pattern:    compiled,
+		ActionName: actionName, // 例如 "bili.link.resolve"
+		Priority:   100,        // URL 匹配默认给予标准优先级
+	}, nil
 }
