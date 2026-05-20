@@ -25,7 +25,7 @@ func init() {
 	}
 
 	// reg executor
-	matcher.RegisterExecutor("bilibili", ExecuteBiliLink)
+	matcher.RegisterExecutor("acat_bili_link", ExecuteBiliLink)
 }
 
 func extractBVID(s string) (isB23tv bool, extracted string) {

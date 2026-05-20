@@ -78,7 +78,7 @@ func DispatchHandler(c *gin.Context) {
 		return
 	}
 
-	// 转换结果
+	// conversion result
 	var messages []ResponseMessage
 	if msgs, ok := result.([]ResponseMessage); ok {
 		messages = msgs

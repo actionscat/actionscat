@@ -2,7 +2,11 @@ module actionscat
 
 go 1.25.3
 
-require github.com/gin-gonic/gin v1.12.0
+require (
+	github.com/gin-gonic/gin v1.12.0
+	github.com/traefik/yaegi v0.16.1
+	github.com/yuin/gopher-lua v1.1.2
+)
 
 require (
 	github.com/bytedance/gopkg v0.1.3 // indirect
