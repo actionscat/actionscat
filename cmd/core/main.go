@@ -7,6 +7,7 @@ import (
 	"os"
 
 	_ "actionscat/actions/acat_bili_link"
+	_ "actionscat/actions/acat_test"
 )
 
 func main() {
