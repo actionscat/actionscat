@@ -28,7 +28,7 @@ func (r *Rule) Match(text string) bool {
 }
 
 func scanActionsLua(text string) (bool, string) {
-	// 相对于项目根目录的 actions 路径
+	// relative path
 	actionsPath := filepath.Join("..", "..", "actions")
 	entries, err := os.ReadDir(actionsPath)
 	if err != nil {
@@ -43,20 +43,18 @@ func scanActionsLua(text string) (bool, string) {
 			continue
 		}
 
-		// 构造子目录路径
+		// construct directory path
 		luaPath := filepath.Join(actionsPath, entry.Name(), "rule.lua")
 		log.Printf("[scanActionsLua] checking %s", luaPath)
 
-		// 查找 rule.lua 文件
+		// find rule.lua
 		if _, err := os.Stat(luaPath); err != nil {
 			log.Printf("[scanActionsLua] rule.lua not found in %s", entry.Name())
 			continue
 		}
 
 		log.Printf("[scanActionsLua] executing %s", luaPath)
-		// 执行 lua 规则
 		if MatchLua(luaPath, text) {
-			// 规则匹配，关联 ActionName
 			log.Printf("[matcher] lua rule matched in %s", entry.Name())
 			return true, entry.Name()
 		}

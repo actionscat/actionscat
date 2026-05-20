@@ -11,9 +11,7 @@ var (
 	b23Regex = regexp.MustCompile(`https?://b23\.tv/[a-zA-Z0-9]+`)
 )
 
-// ========== 核心逻辑函数 ==========
-
-// resolveB23 展开 b23.tv 短链（当遇到 302 时，不自动跟随跳转，而是返回当前响应）
+// resolveB23 unfold bilibili short link
 func resolveB23(shortURL string) string {
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
