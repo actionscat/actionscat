@@ -36,8 +36,6 @@ func scanActionsLua(text string) (bool, string) {
 		return false, ""
 	}
 
-	log.Printf("[scanActionsLua] found %d entries", len(entries))
-
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -45,23 +43,18 @@ func scanActionsLua(text string) (bool, string) {
 
 		// construct directory path
 		luaPath := filepath.Join(actionsPath, entry.Name(), "rule.lua")
-		log.Printf("[scanActionsLua] checking %s", luaPath)
 
 		// find rule.lua
 		if _, err := os.Stat(luaPath); err != nil {
-			log.Printf("[scanActionsLua] rule.lua not found in %s", entry.Name())
 			continue
 		}
 
-		log.Printf("[scanActionsLua] executing %s", luaPath)
 		if MatchLua(luaPath, text) {
 			log.Printf("[matcher] lua rule matched in %s", entry.Name())
 			return true, entry.Name()
 		}
-		log.Printf("[scanActionsLua] %s returned false", entry.Name())
 	}
 
-	log.Printf("[scanActionsLua] no rules matched")
 	return false, ""
 }
 
