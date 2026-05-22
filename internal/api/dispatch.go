@@ -70,7 +70,12 @@ func DispatchHandler(c *gin.Context) {
 	}
 
 	// exec action logic
-	result, err := executor(req.RawMsg)
+	ctx := matcher.ExecutionContext{
+		RawMsg:       req.RawMsg,
+		SenderQQ:     req.SenderQQ,
+		CurrentGroup: req.CurrentGroup,
+	}
+	result, err := executor(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, DispatchResponse{
 			OK: false, Error: &ResponseError{Code: "ERR_EXEC_FAILED", Message: err.Error()},
@@ -80,8 +85,12 @@ func DispatchHandler(c *gin.Context) {
 
 	// conversion result
 	var messages []ResponseMessage
+	log.Printf("[dispatcher] result type: %T, value: %v", result, result)
 	if msgs, ok := result.([]ResponseMessage); ok {
 		messages = msgs
+		log.Printf("[dispatcher] successfully converted to []ResponseMessage, count: %d", len(msgs))
+	} else {
+		log.Printf("[dispatcher] failed to convert result to []ResponseMessage")
 	}
 
 	// compose result to frontend

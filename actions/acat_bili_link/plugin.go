@@ -40,10 +40,10 @@ func extractBVID(s string) (isB23tv bool, extracted string) {
 	return false, ""
 }
 
-func ExecuteBiliLink(rawMsg string) (any, error) {
+func ExecuteBiliLink(ctx matcher.ExecutionContext) (any, error) {
 	log.Printf("[bili_link] 被触发惹！")
 
-	isShort, bvid := extractBVID(rawMsg)
+	isShort, bvid := extractBVID(ctx.RawMsg)
 	if isShort {
 		bvid = resolveB23(bvid)
 	}

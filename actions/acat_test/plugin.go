@@ -11,7 +11,7 @@ func init() {
 	matcher.RegisterExecutor("acat_test", Test)
 }
 
-func Test(rawMsg string) (any, error) {
+func Test(ctx matcher.ExecutionContext) (any, error) {
 	fmt.Println("200 OK")
 	return []api.ResponseMessage{
 		{Type: "text", Text: "200 OK"},

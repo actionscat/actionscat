@@ -1,7 +1,7 @@
 package matcher
 
 import (
-	_ "fmt"
+	"log"
 )
 
 // 1. 全局的匹配引擎
@@ -9,8 +9,14 @@ var GlobalEngine = &SimpleEngine{
 	rules: []*Rule{},
 }
 
-// 2. 插件执行器函数签名：接收原始请求，返回处理结果
-type ExecutorFunc func(rawMsg string) (any, error)
+// 2. 插件执行器函数签名：接收原始请求和执行上下文，返回处理结果
+type ExecutionContext struct {
+	RawMsg       string
+	SenderQQ     string
+	CurrentGroup string
+}
+
+type ExecutorFunc func(ctx ExecutionContext) (any, error)
 
 // 3. 全局的执行器注册表：通过 ActionName 映射到具体的执行函数
 var executorRegistry = make(map[string]ExecutorFunc)
@@ -18,6 +24,7 @@ var executorRegistry = make(map[string]ExecutorFunc)
 // 注册执行器
 func RegisterExecutor(actionName string, exec ExecutorFunc) {
 	executorRegistry[actionName] = exec
+	log.Printf("[registry] executor registered: %s", actionName)
 }
 
 // 获取执行器
