@@ -59,8 +59,9 @@ func main() {
 		faEndpoint = "http://127.0.0.1:8000"
 	}
 	faClient := frostagent.NewHTTPClient(frostagent.Config{
-		BaseURL: faEndpoint,
-		APIKey:  os.Getenv("FROSTAGENT_API_KEY"),
+		BaseURL:      faEndpoint,
+		SendEndpoint: os.Getenv("FROSTAGENT_SEND_ENDPOINT"),
+		APIKey:       os.Getenv("FROSTAGENT_API_KEY"),
 	})
 
 	runtimeEndpoint := os.Getenv("ACTIONSCAT_RUNTIME_ENDPOINT")
@@ -75,6 +76,11 @@ func main() {
 		}
 	}
 
+	mgmtToken := os.Getenv("ACTIONSCAT_MANAGEMENT_TOKEN")
+	if mgmtToken == "" {
+		mgmtToken = os.Getenv("ACTIONSCAT_API_KEY")
+	}
+
 	server := api.NewServer(api.ServerConfig{
 		Store:           sqliteStore,
 		FileStore:       fileStore,
@@ -83,6 +89,7 @@ func main() {
 		FrostAgent:      faClient,
 		RuntimeEndpoint: runtimeEndpoint,
 		RunnerWorkers:   workers,
+		ManagementToken: mgmtToken,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

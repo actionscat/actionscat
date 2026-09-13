@@ -170,7 +170,7 @@ func (s *Service) CreateVersion(ctx context.Context, actionID string, req Create
 
 	// Set defaults
 	if req.BuildSpec.Command == "" {
-		req.BuildSpec.Command = "go build -o /out/entrypoint ."
+		req.BuildSpec.Command = "go build -o /sandbox/out/entrypoint ."
 	}
 	if req.BuildSpec.Language == "" {
 		req.BuildSpec.Language = "go"

@@ -15,7 +15,8 @@ import (
 )
 
 var (
-	ErrInvalidCron = errors.New("invalid cron expression")
+	ErrInvalidCron     = errors.New("invalid cron expression")
+	ErrInvalidTimezone = errors.New("invalid timezone identifier")
 )
 
 type Config struct {
@@ -57,6 +58,7 @@ func NewScheduler(store *store.SQLiteStore, runner *runner.Runner, cfg Config) *
 }
 
 // CalculateNextRun evaluates the next run time according to the cron expression and timezone.
+// It fails closed: invalid timezone names return ErrInvalidTimezone instead of silently defaulting to UTC.
 func (s *Scheduler) CalculateNextRun(cronExpr string, timezone string, from time.Time) (time.Time, error) {
 	schedule, err := s.cronParser.Parse(cronExpr)
 	if err != nil {
@@ -65,9 +67,11 @@ func (s *Scheduler) CalculateNextRun(cronExpr string, timezone string, from time
 
 	loc := time.UTC
 	if timezone != "" {
-		if l, err := time.LoadLocation(timezone); err == nil {
-			loc = l
+		l, err := time.LoadLocation(timezone)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("%w: %q (%v)", ErrInvalidTimezone, timezone, err)
 		}
+		loc = l
 	}
 
 	next := schedule.Next(from.In(loc)).UTC()

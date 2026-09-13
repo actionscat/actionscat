@@ -37,13 +37,24 @@ func sanitizeStatePath(statePath string) (string, error) {
 	if strings.Contains(statePath, "\x00") {
 		return "", ErrInvalidPath
 	}
-	if filepath.VolumeName(statePath) != "" {
+
+	// Reject Windows drive letter patterns (e.g. C:\... or c:/...) across all operating systems
+	if len(statePath) >= 2 {
+		first := statePath[0]
+		if ((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z')) && statePath[1] == ':' {
+			return "", ErrPathTraversal
+		}
+	}
+	// Reject colon anywhere (NTFS alternate data streams, drive letters, URI schemes)
+	if strings.Contains(statePath, ":") {
 		return "", ErrPathTraversal
 	}
 
-	// Normalize separators to forward slash
-	slashPath := filepath.ToSlash(statePath)
-	if strings.HasPrefix(slashPath, "/") || strings.HasPrefix(slashPath, "\\") {
+	// Normalize all backslashes to forward slashes across all host OS platforms
+	slashPath := strings.ReplaceAll(statePath, "\\", "/")
+
+	// Reject absolute paths and UNC paths
+	if strings.HasPrefix(slashPath, "/") {
 		return "", ErrPathTraversal
 	}
 

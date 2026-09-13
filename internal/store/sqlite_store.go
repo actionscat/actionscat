@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -17,7 +18,8 @@ var (
 )
 
 type SQLiteStore struct {
-	db *sql.DB
+	db      *sql.DB
+	claimMu sync.Mutex
 }
 
 func NewSQLiteStore(db *sql.DB) *SQLiteStore {
@@ -821,6 +823,9 @@ func (s *SQLiteStore) MarkRunRunning(ctx context.Context, runID string, startedA
 
 // ClaimNextQueuedRun checks for queued runs whose Action has not exceeded its concurrency limit.
 func (s *SQLiteStore) ClaimNextQueuedRun(ctx context.Context) (*domain.Run, error) {
+	s.claimMu.Lock()
+	defer s.claimMu.Unlock()
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -866,6 +871,50 @@ func (s *SQLiteStore) ClaimNextQueuedRun(ctx context.Context) (*domain.Run, erro
 		return nil, err
 	}
 	return run, nil
+}
+
+// RecoverOrphanRuns identifies any runs left in 'running' status (e.g. after a server crash/restart),
+// marks them as 'interrupted', and revokes all capability tokens associated with those runs.
+// This frees concurrency slots and ensures dead capability tokens cannot be used.
+func (s *SQLiteStore) RecoverOrphanRuns(ctx context.Context, now time.Time) (int64, error) {
+	s.claimMu.Lock()
+	defer s.claimMu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// 1. Revoke tokens belonging to currently running runs
+	revokeQuery := `
+	UPDATE run_tokens
+	SET revoked_at = ?
+	WHERE revoked_at IS NULL
+	  AND run_id IN (SELECT id FROM runs WHERE status = 'running');`
+	if _, err := tx.ExecContext(ctx, revokeQuery, now); err != nil {
+		return 0, fmt.Errorf("revoke orphan tokens: %w", err)
+	}
+
+	// 2. Mark running runs as interrupted
+	runQuery := `
+	UPDATE runs
+	SET status = ?, error_message = ?, completed_at = ?
+	WHERE status = 'running';`
+	res, err := tx.ExecContext(ctx, runQuery, string(domain.RunStatusInterrupted), "process terminated while run was active", now)
+	if err != nil {
+		return 0, fmt.Errorf("update orphan runs: %w", err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit recovery: %w", err)
+	}
+	return affected, nil
 }
 
 func (s *SQLiteStore) ListRuns(ctx context.Context, actionID string, limit, offset int) ([]*domain.Run, error) {

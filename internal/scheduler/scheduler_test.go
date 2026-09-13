@@ -206,7 +206,7 @@ func TestScheduler_CalculateNextRun(t *testing.T) {
 	_, _, _, _, s := setupTestScheduler(t)
 
 	base := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
-	// Every 15 minutes
+	// 1. Every 15 minutes in UTC
 	next, err := s.CalculateNextRun("*/15 * * * *", "UTC", base)
 	if err != nil {
 		t.Fatalf("calc next run: %v", err)
@@ -214,5 +214,39 @@ func TestScheduler_CalculateNextRun(t *testing.T) {
 	expected := time.Date(2026, 9, 13, 12, 15, 0, 0, time.UTC)
 	if !next.Equal(expected) {
 		t.Fatalf("expected %v, got %v", expected, next)
+	}
+
+	// 2. Valid timezone: Asia/Shanghai (UTC+8)
+	// Cron "0 8 * * *" -> 8:00 AM Shanghai time = 0:00 UTC
+	nextSH, err := s.CalculateNextRun("0 8 * * *", "Asia/Shanghai", base)
+	if err != nil {
+		t.Fatalf("calc next run Asia/Shanghai: %v", err)
+	}
+	expectedSH := time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC)
+	if !nextSH.Equal(expectedSH) {
+		t.Fatalf("expected %v, got %v", expectedSH, nextSH)
+	}
+
+	// 3. Fail-closed on invalid timezone identifier (must NOT fall back silently to UTC)
+	_, err = s.CalculateNextRun("0 8 * * *", "Asia/Shangahi", base)
+	if err == nil {
+		t.Fatal("expected error for invalid timezone 'Asia/Shangahi', but got nil")
+	}
+
+	// 4. Invalid cron expression
+	_, err = s.CalculateNextRun("invalid cron", "UTC", base)
+	if err == nil {
+		t.Fatal("expected error for invalid cron expression, but got nil")
+	}
+
+	// 5. Daylight Saving Time (DST) timezone: America/New_York
+	// In September, EDT is UTC-4. "0 12 * * *" (noon EDT) = 16:00 UTC.
+	nextNY, err := s.CalculateNextRun("0 12 * * *", "America/New_York", base)
+	if err != nil {
+		t.Fatalf("calc next run America/New_York: %v", err)
+	}
+	expectedNY := time.Date(2026, 9, 13, 16, 0, 0, 0, time.UTC)
+	if !nextNY.Equal(expectedNY) {
+		t.Fatalf("expected %v, got %v", expectedNY, nextNY)
 	}
 }

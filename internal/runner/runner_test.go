@@ -229,15 +229,12 @@ func TestRunner_ConcurrencyLimit(t *testing.T) {
 	// Action with max_concurrency = 1
 	act, _, _ := createRunnableAction(t, st, fs, "act_concurrency", 1, nil)
 
-	blockChan := make(chan struct{})
-	releaseChan := make(chan struct{})
+	blockChan := make(chan struct{}, 10)
+	releaseChan := make(chan struct{}, 10)
 
 	zero := 0
 	sb.CustomExec = func(_ sandbox.ExecRequest, _ *sandbox.FakeSession) (sandbox.ExecResult, error) {
-		select {
-		case blockChan <- struct{}{}:
-		default:
-		}
+		blockChan <- struct{}{}
 		<-releaseChan
 		return sandbox.ExecResult{ExitCode: &zero, Stdout: "done"}, nil
 	}
@@ -256,7 +253,11 @@ func TestRunner_ConcurrencyLimit(t *testing.T) {
 	}
 
 	// Wait for Run 1 to start executing
-	<-blockChan
+	select {
+	case <-blockChan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for run 1 to start")
+	}
 
 	// Verify Run 1 is running and Run 2 is still queued (blocked by max_concurrency=1)
 	r1Rec, _ := st.GetRun(ctx, run1.ID)
@@ -273,7 +274,12 @@ func TestRunner_ConcurrencyLimit(t *testing.T) {
 	releaseChan <- struct{}{}
 
 	// Wait for Run 2 to start executing
-	<-blockChan
+	select {
+	case <-blockChan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for run 2 to start")
+	}
+
 	r2RecAfter, _ := st.GetRun(ctx, run2.ID)
 	if r2RecAfter.Status != domain.RunStatusRunning {
 		t.Fatalf("run2 should now be running after run1 finished, got %s", r2RecAfter.Status)
@@ -281,4 +287,88 @@ func TestRunner_ConcurrencyLimit(t *testing.T) {
 
 	// Release Run 2
 	releaseChan <- struct{}{}
+}
+
+func TestRunner_CrashRecoveryAndTokenRevocation(t *testing.T) {
+	st, fs, _, _, r := setupTestRunner(t, 2)
+	ctx := t.Context()
+
+	act, _, _ := createRunnableAction(t, st, fs, "act_crash_recover", 1, nil)
+
+	// Create run directly and claim it as running (simulating crash before completion)
+	run1, err := r.CreateRun(ctx, CreateRunRequest{ActionID: act.ID, TriggerType: domain.TriggerTypeManual})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	claimed, err := st.ClaimNextQueuedRun(ctx)
+	if err != nil || claimed == nil || claimed.ID != run1.ID {
+		t.Fatalf("claim failed: %v", err)
+	}
+
+	// Create an unrevoked token for this run (simulating unrevoked token in DB)
+	_, hash, err := domain.GenerateRawToken()
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+	tok := &domain.RunToken{
+		ID:        "tok_crash_test",
+		TokenHash: hash,
+		RunID:     claimed.ID,
+		ActionID:  act.ID,
+		Scopes:    []string{"write_state"},
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+		CreatedAt: time.Now(),
+	}
+	if err := st.CreateRunToken(ctx, tok); err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	// Concurrency slot is now occupied: another run for this action should NOT be claimable
+	run2, err := r.CreateRun(ctx, CreateRunRequest{ActionID: act.ID, TriggerType: domain.TriggerTypeManual})
+	if err != nil {
+		t.Fatalf("create run2: %v", err)
+	}
+	blockedClaim, err := st.ClaimNextQueuedRun(ctx)
+	if err != nil {
+		t.Fatalf("claim error: %v", err)
+	}
+	if blockedClaim != nil {
+		t.Fatalf("expected claim to be blocked by max_concurrency=1, got %v", blockedClaim.ID)
+	}
+
+	// Simulate Server Restart: Start runner, which invokes RecoverOrphans
+	recovered, err := r.RecoverOrphans(ctx)
+	if err != nil {
+		t.Fatalf("recover orphans: %v", err)
+	}
+	if recovered != 1 {
+		t.Fatalf("expected 1 recovered run, got %d", recovered)
+	}
+
+	// 1. Verify orphan run is now marked interrupted
+	recoveredRun, err := st.GetRun(ctx, claimed.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if recoveredRun.Status != domain.RunStatusInterrupted {
+		t.Fatalf("expected run status %s, got %s", domain.RunStatusInterrupted, recoveredRun.Status)
+	}
+
+	// 2. Verify token is now revoked
+	tokens, err := st.ListTokensForRun(ctx, claimed.ID)
+	if err != nil {
+		t.Fatalf("list tokens: %v", err)
+	}
+	if len(tokens) == 0 || tokens[0].RevokedAt == nil {
+		t.Fatal("expected token to be revoked upon orphan recovery")
+	}
+
+	// 3. Verify concurrency slot is now freed: run2 can now be claimed!
+	claimedAfter, err := st.ClaimNextQueuedRun(ctx)
+	if err != nil {
+		t.Fatalf("claim after recovery: %v", err)
+	}
+	if claimedAfter == nil || claimedAfter.ID != run2.ID {
+		t.Fatalf("expected run2 to be claimed now, got %v", claimedAfter)
+	}
 }

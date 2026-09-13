@@ -137,10 +137,23 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 		}
 	}
 
-	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)", dbPath)
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)", dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
+	}
+
+	// SQLite WAL mode supports multiple readers with single writer; serialize pool connections to avoid 'database is locked'
+	db.SetMaxOpenConns(1)
+
+	if _, err := db.Exec(`
+		PRAGMA journal_mode=WAL;
+		PRAGMA busy_timeout=10000;
+		PRAGMA foreign_keys=ON;
+		PRAGMA synchronous=NORMAL;
+	`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to configure sqlite pragmas: %w", err)
 	}
 
 	if _, err := db.Exec(schemaDDL); err != nil {

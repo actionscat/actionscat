@@ -16,17 +16,18 @@ import (
 )
 
 type Server struct {
-	Store         *store.SQLiteStore
-	FileStore     *store.FileStore
-	StateStore    *store.StateStore
-	ActionService *action.Service
-	Builder       *build.Builder
-	Runner        *runner.Runner
-	Scheduler     *scheduler.Scheduler
-	MatcherEngine *matcher.Engine
-	RuntimeAPI    *runtime.API
-	ManagementAPI *ManagementAPI
-	Dispatch      *DispatchHandler
+	Store           *store.SQLiteStore
+	FileStore       *store.FileStore
+	StateStore      *store.StateStore
+	ActionService   *action.Service
+	Builder         *build.Builder
+	Runner          *runner.Runner
+	Scheduler       *scheduler.Scheduler
+	MatcherEngine   *matcher.Engine
+	RuntimeAPI      *runtime.API
+	ManagementAPI   *ManagementAPI
+	Dispatch        *DispatchHandler
+	ManagementToken string
 }
 
 type ServerConfig struct {
@@ -37,6 +38,7 @@ type ServerConfig struct {
 	FrostAgent      frostagent.Client
 	RuntimeEndpoint string
 	RunnerWorkers   int
+	ManagementToken string
 }
 
 func NewServer(cfg ServerConfig) *Server {
@@ -55,17 +57,18 @@ func NewServer(cfg ServerConfig) *Server {
 	dispatchHandler := NewDispatchHandler(eng)
 
 	return &Server{
-		Store:         cfg.Store,
-		FileStore:     cfg.FileStore,
-		StateStore:    cfg.StateStore,
-		ActionService: actSvc,
-		Builder:       builder,
-		Runner:        r,
-		Scheduler:     sched,
-		MatcherEngine: eng,
-		RuntimeAPI:    runtimeAPI,
-		ManagementAPI: mgmtAPI,
-		Dispatch:      dispatchHandler,
+		Store:           cfg.Store,
+		FileStore:       cfg.FileStore,
+		StateStore:      cfg.StateStore,
+		ActionService:   actSvc,
+		Builder:         builder,
+		Runner:          r,
+		Scheduler:       sched,
+		MatcherEngine:   eng,
+		RuntimeAPI:      runtimeAPI,
+		ManagementAPI:   mgmtAPI,
+		Dispatch:        dispatchHandler,
+		ManagementToken: cfg.ManagementToken,
 	}
 }
 
@@ -86,6 +89,7 @@ func (s *Server) SetupRouter() *gin.Engine {
 
 	// Management API (called by operators, CLI, and FrostAgent management plane)
 	mgmtGroup := r.Group("/api/v1")
+	mgmtGroup.Use(ManagementAuthMiddleware(s.ManagementToken, s.Store))
 	s.ManagementAPI.RegisterRoutes(mgmtGroup)
 
 	return r

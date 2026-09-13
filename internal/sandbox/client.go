@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +36,8 @@ type Client struct {
 	sessionNamespace string
 	httpClient       *http.Client
 	projectNamespace [16]byte
+	mu               sync.RWMutex
+	sessions         map[string]SessionRequest
 }
 
 func NewClient(cfg Config) *Client {
@@ -48,6 +52,7 @@ func NewClient(cfg Config) *Client {
 		sessionNamespace: cfg.SessionNamespace,
 		httpClient:       &http.Client{Timeout: timeout},
 		projectNamespace: defaultProjectNamespace,
+		sessions:         make(map[string]SessionRequest),
 	}
 }
 
@@ -89,16 +94,58 @@ func (c *Client) Health(ctx context.Context) error {
 	return nil
 }
 
+type gatewaySessionInitRequest struct {
+	UserUUID      string            `json:"user_uuid"`
+	Profile       string            `json:"profile,omitempty"`
+	Network       string            `json:"network,omitempty"`
+	MemoryLimitMB int               `json:"memory_limit_mb,omitempty"`
+	CPULimit      float64           `json:"cpu_limit,omitempty"`
+	Env           map[string]string `json:"env,omitempty"`
+}
+
 func (c *Client) CreateSession(ctx context.Context, req SessionRequest) (*SessionHandle, error) {
 	if req.SessionID == "" {
 		return nil, ErrInvalidRequest
 	}
 	userUUID := c.SessionIDToUUID(req.SessionID)
 
-	// In code-interpreter architecture, the session worker is allocated on first call (e.g. status or exec)
-	// We verify reachability of the gateway
+	// Verify reachability of the gateway
 	if err := c.Health(ctx); err != nil {
 		return nil, err
+	}
+
+	// Store session policy and settings locally
+	c.mu.Lock()
+	c.sessions[req.SessionID] = req
+	c.mu.Unlock()
+
+	// Proactively notify the gateway if it supports explicit session initialization
+	initURL := c.baseURL + "/api/v1/sessions"
+	initBody, err := json.Marshal(gatewaySessionInitRequest{
+		UserUUID:      userUUID,
+		Profile:       req.Profile,
+		Network:       req.Network.Mode,
+		MemoryLimitMB: req.MemoryLimitMB,
+		CPULimit:      req.CPULimit,
+		Env:           req.Env,
+	})
+	if err == nil {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, initURL, bytes.NewReader(initBody))
+		if err == nil {
+			httpReq.Header.Set("Content-Type", "application/json")
+			httpReq.Header.Set("X-Auth-Token", c.authToken)
+			if resp, err := c.httpClient.Do(httpReq); err == nil {
+				_ = resp.Body.Close()
+				// If 200/201/204 or 404 (endpoint not supported by gateway), proceed safely.
+				// If 401/403/500+, report failure
+				if resp.StatusCode != http.StatusOK &&
+					resp.StatusCode != http.StatusCreated &&
+					resp.StatusCode != http.StatusNoContent &&
+					resp.StatusCode != http.StatusNotFound {
+					return nil, fmt.Errorf("%w: gateway returned HTTP %d on session init", ErrSandboxUnavailable, resp.StatusCode)
+				}
+			}
+		}
 	}
 
 	return &SessionHandle{
@@ -136,6 +183,24 @@ func (c *Client) Exec(ctx context.Context, req ExecRequest) (ExecResult, error) 
 	}
 	q := execURL.Query()
 	q.Set("user_uuid", userUUID)
+
+	// Propagate profile, network, and resource policy if configured for this session
+	c.mu.RLock()
+	sessReq, hasSess := c.sessions[req.SessionID]
+	c.mu.RUnlock()
+
+	mergedEnv := make(map[string]string)
+	if hasSess {
+		if sessReq.Profile != "" {
+			q.Set("profile", sessReq.Profile)
+		}
+		if sessReq.Network.Mode != "" {
+			q.Set("network", sessReq.Network.Mode)
+		}
+		maps.Copy(mergedEnv, sessReq.Env)
+	}
+	maps.Copy(mergedEnv, req.Env)
+
 	execURL.RawQuery = q.Encode()
 
 	timeoutSec := req.Timeout.Seconds()
@@ -150,9 +215,9 @@ func (c *Client) Exec(ctx context.Context, req ExecRequest) (ExecResult, error) 
 
 	// If environment variables are provided, prepend them securely to command execution
 	fullCmd := req.Command
-	if len(req.Env) > 0 {
+	if len(mergedEnv) > 0 {
 		var envBuilder strings.Builder
-		for k, v := range req.Env {
+		for k, v := range mergedEnv {
 			// export key='escaped_val'
 			escapedVal := strings.ReplaceAll(v, "'", `'\''`)
 			fmt.Fprintf(&envBuilder, "export %s='%s'; ", k, escapedVal)
@@ -213,7 +278,9 @@ func (c *Client) UploadFiles(ctx context.Context, sessionID string, files map[st
 	var script strings.Builder
 	for relPath, data := range files {
 		encoded := base64.StdEncoding.EncodeToString(data)
-		targetPath := "/sandbox/" + strings.TrimPrefix(relPath, "/")
+		cleanRel := strings.TrimPrefix(relPath, "/")
+		cleanRel = strings.TrimPrefix(cleanRel, "sandbox/")
+		targetPath := "/sandbox/" + cleanRel
 		targetDir := targetPath[:strings.LastIndex(targetPath, "/")]
 
 		fmt.Fprintf(&script, "mkdir -p %q && base64 -d <<'EOF' > %q\n%s\nEOF\n", targetDir, targetPath, encoded)
@@ -238,8 +305,12 @@ func (c *Client) UploadFiles(ctx context.Context, sessionID string, files map[st
 func (c *Client) ExportFiles(ctx context.Context, sessionID string, paths []string) (map[string][]byte, error) {
 	out := make(map[string][]byte)
 	for _, p := range paths {
-		targetPath := "/sandbox/" + strings.TrimPrefix(p, "/")
-		cmd := fmt.Sprintf("base64 -w 0 %q 2>/dev/null || true", targetPath)
+		cleanRel := strings.TrimPrefix(p, "/")
+		cleanRel = strings.TrimPrefix(cleanRel, "sandbox/")
+
+		// Check /sandbox/<path> as well as root /<path>
+		cmd := fmt.Sprintf("base64 -w 0 %q 2>/dev/null || base64 -w 0 %q 2>/dev/null || true",
+			"/sandbox/"+cleanRel, "/"+cleanRel)
 
 		res, err := c.Exec(ctx, ExecRequest{
 			SessionID: sessionID,
@@ -268,6 +339,10 @@ func (c *Client) Release(ctx context.Context, sessionID string) error {
 		return nil
 	}
 	userUUID := c.SessionIDToUUID(sessionID)
+
+	c.mu.Lock()
+	delete(c.sessions, sessionID)
+	c.mu.Unlock()
 
 	releaseURL, err := url.Parse(c.baseURL + "/api/v1/release")
 	if err != nil {
@@ -301,9 +376,21 @@ func (c *Client) Release(ctx context.Context, sessionID string) error {
 }
 
 func (c *Client) ToolchainBaseline(ctx context.Context, profile string) (ToolchainInfo, error) {
-	// Execute "go version" in a temporary builder session to detect actual Go baseline
+	if profile == "" {
+		profile = ProfileGoBuilder
+	}
+
+	// Execute "go version" in a temporary builder session using the specified profile
 	tempSession := fmt.Sprintf("detect-toolchain-%d", time.Now().UnixNano())
 	defer func() { _ = c.Release(context.Background(), tempSession) }()
+
+	// Explicitly target the requested profile (e.g. go-builder)
+	if _, err := c.CreateSession(ctx, SessionRequest{
+		SessionID: tempSession,
+		Profile:   profile,
+	}); err != nil {
+		return ToolchainInfo{}, fmt.Errorf("failed to create detection session for profile %q: %w", profile, err)
+	}
 
 	res, err := c.Exec(ctx, ExecRequest{
 		SessionID: tempSession,

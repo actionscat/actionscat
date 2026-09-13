@@ -21,14 +21,15 @@ const (
 	RunStatusRunning   RunStatus = "running"
 	RunStatusSucceeded RunStatus = "succeeded"
 	RunStatusFailed    RunStatus = "failed"
-	RunStatusTimedOut  RunStatus = "timed_out"
-	RunStatusCancelled RunStatus = "cancelled"
+	RunStatusTimedOut    RunStatus = "timed_out"
+	RunStatusCancelled  RunStatus = "cancelled"
+	RunStatusInterrupted RunStatus = "interrupted"
 )
 
 // IsTerminal returns true if the Run has reached a final state.
 func (s RunStatus) IsTerminal() bool {
 	switch s {
-	case RunStatusSucceeded, RunStatusFailed, RunStatusTimedOut, RunStatusCancelled:
+	case RunStatusSucceeded, RunStatusFailed, RunStatusTimedOut, RunStatusCancelled, RunStatusInterrupted:
 		return true
 	default:
 		return false

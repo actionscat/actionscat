@@ -201,8 +201,20 @@ func (r *Runner) TriggerWakeup() {
 	}
 }
 
+// RecoverOrphans forces recovery of any dangling 'running' runs and revokes their capability tokens.
+func (r *Runner) RecoverOrphans(ctx context.Context) (int64, error) {
+	return r.store.RecoverOrphanRuns(ctx, time.Now().UTC())
+}
+
 // Start launches the bounded worker pool and queue processor.
 func (r *Runner) Start(ctx context.Context) {
+	// Crash recovery: identify orphan runs left in 'running' state and revoke tokens
+	if n, err := r.store.RecoverOrphanRuns(ctx, time.Now().UTC()); err != nil {
+		log.Printf("[runner] error during orphan run recovery: %v", err)
+	} else if n > 0 {
+		log.Printf("[runner] recovered %d orphan run(s) from previous server shutdown", n)
+	}
+
 	r.mu.Lock()
 	runCtx, cancel := context.WithCancel(ctx)
 	r.cancel = cancel

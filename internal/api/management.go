@@ -189,6 +189,8 @@ func (m *ManagementAPI) DeleteAction(c *gin.Context) {
 
 type CreateVersionReq struct {
 	Files               map[string]string       `json:"files" binding:"required"`
+	Encodings           map[string]string       `json:"encodings"`      // optional: filename -> "utf8"|"base64"
+	FileEncodings       map[string]string       `json:"file_encodings"` // alias for encodings
 	BuildSpec           domain.BuildSpec        `json:"build_spec"`
 	RuntimeSpec         domain.RuntimeSpec      `json:"runtime_spec"`
 	StateInjections     []domain.StateInjection `json:"state_injections"`
@@ -203,13 +205,33 @@ func (m *ManagementAPI) CreateVersion(c *gin.Context) {
 		return
 	}
 
+	encodings := req.Encodings
+	if encodings == nil {
+		encodings = req.FileEncodings
+	}
+
 	fileMap := make(map[string][]byte, len(req.Files))
 	for name, content := range req.Files {
-		// Attempt base64 decode; fallback to raw bytes
-		if decoded, err := base64.StdEncoding.DecodeString(content); err == nil && len(decoded) > 0 {
-			fileMap[name] = decoded
-		} else {
+		enc := "utf8"
+		if encodings != nil {
+			if specified, ok := encodings[name]; ok && specified != "" {
+				enc = strings.ToLower(strings.TrimSpace(specified))
+			}
+		}
+
+		switch enc {
+		case "utf8", "utf-8", "text", "plain":
 			fileMap[name] = []byte(content)
+		case "base64", "b64":
+			decoded, err := base64.StdEncoding.DecodeString(content)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid base64 content for file %q: %v", name, err)})
+				return
+			}
+			fileMap[name] = decoded
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported encoding %q for file %q (must be 'utf8' or 'base64')", enc, name)})
+			return
 		}
 	}
 
