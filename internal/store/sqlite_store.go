@@ -370,6 +370,29 @@ func (s *SQLiteStore) ListBuilds(ctx context.Context, versionID string) ([]*doma
 	return list, nil
 }
 
+func (s *SQLiteStore) ListBuildsForAction(ctx context.Context, actionID string) ([]*domain.ArtifactBuild, error) {
+	query := `
+	SELECT id, action_id, version_id, build_number, status, builder_profile,
+	       toolchain_version, build_command, stdout, stderr, exit_code,
+	       artifact_digest, artifact_path, artifact_size, started_at, completed_at, created_at
+	FROM artifact_builds WHERE action_id = ? ORDER BY created_at DESC;`
+	rows, err := s.db.QueryContext(ctx, query, actionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list builds for action: %w", err)
+	}
+	defer rows.Close()
+
+	var list []*domain.ArtifactBuild
+	for rows.Next() {
+		b, err := scanBuild(rows)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, b)
+	}
+	return list, nil
+}
+
 func scanBuild(s rowScanner) (*domain.ArtifactBuild, error) {
 	var b domain.ArtifactBuild
 	var status string
@@ -615,11 +638,11 @@ func (s *SQLiteStore) CreateMatcher(ctx context.Context, m *domain.Matcher) erro
 	}
 	query := `
 	INSERT INTO matchers (
-		id, action_id, name, match_type, pattern, target_field, capture_env_map_json, priority, enabled, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+		id, action_id, name, match_type, pattern, target_field, capture_env_map_json, priority, continue_matching, enabled, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 	_, err = s.db.ExecContext(ctx, query,
 		m.ID, m.ActionID, m.Name, string(m.MatchType), m.Pattern, m.TargetField,
-		string(captureJSON), m.Priority, m.Enabled, m.CreatedAt, m.UpdatedAt,
+		string(captureJSON), m.Priority, m.ContinueMatching, m.Enabled, m.CreatedAt, m.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create matcher: %w", err)
@@ -629,7 +652,7 @@ func (s *SQLiteStore) CreateMatcher(ctx context.Context, m *domain.Matcher) erro
 
 func (s *SQLiteStore) GetMatcher(ctx context.Context, id string) (*domain.Matcher, error) {
 	query := `
-	SELECT id, action_id, name, match_type, pattern, target_field, capture_env_map_json, priority, enabled, created_at, updated_at
+	SELECT id, action_id, name, match_type, pattern, target_field, capture_env_map_json, priority, continue_matching, enabled, created_at, updated_at
 	FROM matchers WHERE id = ?;`
 	row := s.db.QueryRowContext(ctx, query, id)
 	return scanMatcher(row)
@@ -637,7 +660,7 @@ func (s *SQLiteStore) GetMatcher(ctx context.Context, id string) (*domain.Matche
 
 func (s *SQLiteStore) ListEnabledMatchers(ctx context.Context) ([]*domain.Matcher, error) {
 	query := `
-	SELECT id, action_id, name, match_type, pattern, target_field, capture_env_map_json, priority, enabled, created_at, updated_at
+	SELECT id, action_id, name, match_type, pattern, target_field, capture_env_map_json, priority, continue_matching, enabled, created_at, updated_at
 	FROM matchers
 	WHERE enabled = 1
 	ORDER BY priority DESC, created_at ASC;`
@@ -660,7 +683,7 @@ func (s *SQLiteStore) ListEnabledMatchers(ctx context.Context) ([]*domain.Matche
 
 func (s *SQLiteStore) ListMatchers(ctx context.Context, actionID string) ([]*domain.Matcher, error) {
 	query := `
-	SELECT id, action_id, name, match_type, pattern, target_field, capture_env_map_json, priority, enabled, created_at, updated_at
+	SELECT id, action_id, name, match_type, pattern, target_field, capture_env_map_json, priority, continue_matching, enabled, created_at, updated_at
 	FROM matchers WHERE action_id = ? ORDER BY priority DESC, created_at ASC;`
 	rows, err := s.db.QueryContext(ctx, query, actionID)
 	if err != nil {
@@ -698,7 +721,7 @@ func scanMatcher(s rowScanner) (*domain.Matcher, error) {
 	var captureJSON string
 	err := s.Scan(
 		&m.ID, &m.ActionID, &m.Name, &matchType, &m.Pattern, &m.TargetField,
-		&captureJSON, &m.Priority, &m.Enabled, &m.CreatedAt, &m.UpdatedAt,
+		&captureJSON, &m.Priority, &m.ContinueMatching, &m.Enabled, &m.CreatedAt, &m.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

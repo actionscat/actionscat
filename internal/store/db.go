@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS matchers (
 	target_field TEXT NOT NULL DEFAULT 'text',
 	capture_env_map_json TEXT NOT NULL DEFAULT '{}',
 	priority INTEGER NOT NULL DEFAULT 0,
+	continue_matching INTEGER NOT NULL DEFAULT 0,
 	enabled INTEGER NOT NULL DEFAULT 1,
 	created_at DATETIME NOT NULL,
 	updated_at DATETIME NOT NULL
