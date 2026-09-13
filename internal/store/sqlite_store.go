@@ -464,6 +464,19 @@ func (s *SQLiteStore) UpdateSchedule(ctx context.Context, sched *domain.Schedule
 	return nil
 }
 
+func (s *SQLiteStore) AdvanceScheduleNextRun(ctx context.Context, id string, nextRunAt time.Time) error {
+	query := `UPDATE schedules SET next_run_at = ?, updated_at = ? WHERE id = ?;`
+	res, err := s.db.ExecContext(ctx, query, nextRunAt, time.Now().UTC(), id)
+	if err != nil {
+		return fmt.Errorf("failed to advance schedule next_run_at: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *SQLiteStore) ListDueSchedules(ctx context.Context, now time.Time, limit int) ([]*domain.Schedule, error) {
 	query := `
 	SELECT id, action_id, cron_expr, timezone, next_run_at, last_run_at, enabled, created_at, updated_at
@@ -976,4 +989,37 @@ func (s *SQLiteStore) RevokeTokensForRun(ctx context.Context, runID string, revo
 	query := `UPDATE run_tokens SET revoked_at = ? WHERE run_id = ? AND revoked_at IS NULL;`
 	_, err := s.db.ExecContext(ctx, query, revokedAt, runID)
 	return err
+}
+
+func (s *SQLiteStore) ListTokensForRun(ctx context.Context, runID string) ([]*domain.RunToken, error) {
+	query := `
+	SELECT id, token_hash, run_id, action_id, scopes_json, expires_at, revoked_at, created_at
+	FROM run_tokens WHERE run_id = ? ORDER BY created_at ASC;`
+	rows, err := s.db.QueryContext(ctx, query, runID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query run tokens: %w", err)
+	}
+	defer rows.Close()
+
+	var list []*domain.RunToken
+	for rows.Next() {
+		var token domain.RunToken
+		var scopesJSON string
+		var revokedAt sql.NullTime
+		if err := rows.Scan(
+			&token.ID, &token.TokenHash, &token.RunID, &token.ActionID,
+			&scopesJSON, &token.ExpiresAt, &revokedAt, &token.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan run token: %w", err)
+		}
+		if revokedAt.Valid {
+			t := revokedAt.Time
+			token.RevokedAt = &t
+		}
+		if err := json.Unmarshal([]byte(scopesJSON), &token.Scopes); err != nil {
+			return nil, fmt.Errorf("unmarshal scopes: %w", err)
+		}
+		list = append(list, &token)
+	}
+	return list, nil
 }
