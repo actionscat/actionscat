@@ -13,18 +13,18 @@ import (
 )
 
 var (
-	ErrInvalidRequest   = errors.New("invalid frostagent request")
-	ErrDeliveryFailed   = errors.New("frostagent delivery failed")
-	ErrUnauthenticated  = errors.New("frostagent authentication failed")
+	ErrInvalidRequest  = errors.New("invalid frostagent request")
+	ErrDeliveryFailed  = errors.New("frostagent delivery failed")
+	ErrUnauthenticated = errors.New("frostagent authentication failed")
 )
 
 type MessageItem struct {
-	Type          string `json:"type"`                     // "plain", "image", "record", "video", "file", "mention_user", "quote"
-	Text          string `json:"text,omitempty"`           // text content when type is "plain"
-	MentionUserID string `json:"mention_user_id,omitempty"`// platform user ID when type is "mention_user"
-	MessageID     string `json:"message_id,omitempty"`     // message ID to reply to when type is "quote"
-	URL           string `json:"url,omitempty"`            // web link for media/file
-	Path          string `json:"path,omitempty"`           // path for media
+	Type          string `json:"type"`                      // "plain", "image", "record", "video", "file", "mention_user", "quote"
+	Text          string `json:"text,omitempty"`            // text content when type is "plain"
+	MentionUserID string `json:"mention_user_id,omitempty"` // platform user ID when type is "mention_user"
+	MessageID     string `json:"message_id,omitempty"`      // message ID to reply to when type is "quote"
+	URL           string `json:"url,omitempty"`             // web link for media/file
+	Path          string `json:"path,omitempty"`            // path for media
 	IsSticker     bool   `json:"is_sticker,omitempty"`
 }
 

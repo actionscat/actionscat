@@ -8,10 +8,10 @@ import (
 )
 
 var (
-	ErrSessionNotFound     = errors.New("sandbox session not found")
-	ErrSandboxUnavailable  = errors.New("sandbox infrastructure unavailable")
-	ErrExecutionFailed     = errors.New("sandbox execution failed")
-	ErrInvalidRequest      = errors.New("invalid sandbox request")
+	ErrSessionNotFound    = errors.New("sandbox session not found")
+	ErrSandboxUnavailable = errors.New("sandbox infrastructure unavailable")
+	ErrExecutionFailed    = errors.New("sandbox execution failed")
+	ErrInvalidRequest     = errors.New("invalid sandbox request")
 )
 
 const (

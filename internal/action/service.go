@@ -30,6 +30,13 @@ type CreateActionRequest struct {
 	MaxConcurrency int    `json:"max_concurrency"` // default 1
 }
 
+type UpdateActionRequest struct {
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+	MaxConcurrency int    `json:"max_concurrency"`
+	Enabled        bool   `json:"enabled"`
+}
+
 type CreateVersionRequest struct {
 	Files               map[string][]byte       `json:"-"` // source bundle
 	BuildSpec           domain.BuildSpec        `json:"build_spec"`
@@ -105,6 +112,31 @@ func (s *Service) GetAction(ctx context.Context, actionID string) (*domain.Actio
 
 func (s *Service) ListActions(ctx context.Context) ([]*domain.Action, error) {
 	return s.store.ListActions(ctx)
+}
+
+func (s *Service) UpdateAction(ctx context.Context, actionID string, req UpdateActionRequest) (*domain.Action, error) {
+	act, err := s.store.GetAction(ctx, actionID)
+	if err != nil {
+		return nil, err
+	}
+	if req.Name != "" {
+		act.Name = req.Name
+	}
+	act.Description = req.Description
+	if req.MaxConcurrency > 0 {
+		act.MaxConcurrency = req.MaxConcurrency
+	}
+	act.Enabled = req.Enabled
+	act.UpdatedAt = time.Now().UTC()
+
+	if err := s.store.UpdateAction(ctx, act); err != nil {
+		return nil, err
+	}
+	return act, nil
+}
+
+func (s *Service) DeleteAction(ctx context.Context, actionID string) error {
+	return s.store.DeleteAction(ctx, actionID)
 }
 
 func (s *Service) CreateVersion(ctx context.Context, actionID string, req CreateVersionRequest) (*domain.ActionVersion, error) {

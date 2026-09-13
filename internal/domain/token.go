@@ -12,7 +12,7 @@ import (
 
 // Capability scopes for runtime capability tokens.
 const (
-	ScopeStateWrite       = "state.write"
+	ScopeStateWrite        = "state.write"
 	ScopeFrostAgentSendMsg = "frostagent.sendmsg"
 )
 

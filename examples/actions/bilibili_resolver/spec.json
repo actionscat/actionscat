@@ -1,0 +1,26 @@
+{
+  "name": "bilibili_resolver",
+  "description": "Resolves Bilibili b23.tv links and BVIDs and replies with video statistics",
+  "build_spec": {
+    "language": "go",
+    "go_version": "1.24",
+    "build_command": "go build -o /out/entrypoint main.go",
+    "toolchain_profile": "go-builder"
+  },
+  "runtime_spec": {
+    "entrypoint": "entrypoint",
+    "timeout_seconds": 30,
+    "memory_limit_mb": 128,
+    "cpu_limit": 1.0,
+    "network": {
+      "mode": "allowlist",
+      "allow": [
+        { "host": "api.bilibili.com", "port": 443 },
+        { "host": "b23.tv", "port": 443 }
+      ]
+    }
+  },
+  "runtime_capabilities": [
+    "frostagent.sendmsg"
+  ]
+}

@@ -22,10 +22,10 @@ const (
 )
 
 var (
-	ErrNoActiveBuild   = errors.New("action has no active build")
-	ErrActionDisabled  = errors.New("action is disabled")
-	ErrEnvTooLarge     = errors.New("environment variable exceeds size limit")
-	ErrMissingState    = errors.New("required state injection file does not exist")
+	ErrNoActiveBuild  = errors.New("action has no active build")
+	ErrActionDisabled = errors.New("action is disabled")
+	ErrEnvTooLarge    = errors.New("environment variable exceeds size limit")
+	ErrMissingState   = errors.New("required state injection file does not exist")
 )
 
 type Config struct {
