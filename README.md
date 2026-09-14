@@ -3,7 +3,7 @@
 面向 AI 生成代码的确定性、版本化、可调度、安全隔离的长期 Action 托管与执行平台。
 
 [![License](https://img.shields.io/badge/license-MPL--2.0-blue.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.22+-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.25.3+-blue.svg)](https://golang.org)
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen.svg)](https://github.com/actionscat/actionscat/actions)
 
 ---
@@ -136,6 +136,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -150,23 +151,26 @@ type AttendanceState struct {
 
 func main() {
 	ctx := context.Background()
-	actCtx, err := actionscat.GetContext()
-	if err != nil {
-		log.Fatalf("failed to read context: %v", err)
-	}
+	_ = actionscat.GetContext()
 
 	state := AttendanceState{
 		Count:       4,
 		LastUpdated: time.Now().UTC(),
 	}
+	stateBytes, err := json.Marshal(state)
+	if err != nil {
+		log.Fatalf("failed to marshal state: %v", err)
+	}
 
 	// 原子回写状态至 ActionsCat Core
-	if err := actionscat.WriteState(ctx, "attendance.json", state); err != nil {
+	if err := actionscat.WriteState(ctx, "attendance.json", stateBytes); err != nil {
 		log.Fatalf("failed to write state: %v", err)
 	}
 
 	// 通过受控代理通道回复消息
-	_ = actCtx.Reply(ctx, fmt.Sprintf("已成功打卡！当前在店人数: %d", state.Count))
+	if err := actionscat.Reply(ctx, fmt.Sprintf("已成功打卡！当前在店人数: %d", state.Count)); err != nil {
+		log.Fatalf("failed to reply: %v", err)
+	}
 }
 ```
 

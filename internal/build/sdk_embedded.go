@@ -1,4 +1,12 @@
-package actionscat
+package build
+
+import (
+	"maps"
+	"strings"
+)
+
+// EmbeddedSDKSource contains the canonical actionscat Go SDK source code for injection into build sandboxes.
+const EmbeddedSDKSource = `package actionscat
 
 import (
 	"bytes"
@@ -99,22 +107,22 @@ func WriteState(ctx context.Context, path string, data []byte) error {
 }
 
 type MessageItem struct {
-	Type          string `json:"type"` // "plain", "image", "record", "video", "file", "mention_user", "quote"
-	Text          string `json:"text,omitempty"`
-	MentionUserID string `json:"mention_user_id,omitempty"`
-	MessageID     string `json:"message_id,omitempty"`
-	URL           string `json:"url,omitempty"`
-	Path          string `json:"path,omitempty"`
+	Type          string ` + "`" + `json:"type"` + "`" + ` // "plain", "image", "record", "video", "file", "mention_user", "quote"
+	Text          string ` + "`" + `json:"text,omitempty"` + "`" + `
+	MentionUserID string ` + "`" + `json:"mention_user_id,omitempty"` + "`" + `
+	MessageID     string ` + "`" + `json:"message_id,omitempty"` + "`" + `
+	URL           string ` + "`" + `json:"url,omitempty"` + "`" + `
+	Path          string ` + "`" + `json:"path,omitempty"` + "`" + `
 }
 
 // SendMessageRequest carries canonical routing and message content for FrostAgent delivery.
 type SendMessageRequest struct {
-	Platform    string        `json:"platform,omitempty"`
-	MessageType string        `json:"message_type,omitempty"`
-	TargetID    string        `json:"target_id,omitempty"`
-	Session     string        `json:"session,omitempty"`
-	Messages    []MessageItem `json:"messages,omitempty"`
-	Content     string        `json:"content,omitempty"`
+	Platform    string        ` + "`" + `json:"platform,omitempty"` + "`" + `
+	MessageType string        ` + "`" + `json:"message_type,omitempty"` + "`" + `
+	TargetID    string        ` + "`" + `json:"target_id,omitempty"` + "`" + `
+	Session     string        ` + "`" + `json:"session,omitempty"` + "`" + `
+	Messages    []MessageItem ` + "`" + `json:"messages,omitempty"` + "`" + `
+	Content     string        ` + "`" + `json:"content,omitempty"` + "`" + `
 }
 
 // Send sends a structured message request through Core's trusted FrostAgent proxy.
@@ -200,4 +208,37 @@ func Reply(ctx context.Context, text string) error {
 			{Type: "plain", Text: text},
 		},
 	})
+}
+`
+
+// InjectSDK ensures that every Action source bundle uploaded to a Go builder container
+// has access to the official ActionsCat SDK without relying on external network or GOPROXY.
+func InjectSDK(sourceFiles map[string][]byte) map[string][]byte {
+	result := make(map[string][]byte, len(sourceFiles)+3)
+	maps.Copy(result, sourceFiles)
+
+	// 1. Inject internal SDK module files into ./_sdk
+	if _, hasSDKMod := result["_sdk/go.mod"]; !hasSDKMod {
+		result["_sdk/go.mod"] = []byte("module actionscat\n\ngo 1.25.3\n")
+	}
+	if _, hasSDKGo := result["_sdk/pkg/actionscat/sdk.go"]; !hasSDKGo {
+		result["_sdk/pkg/actionscat/sdk.go"] = []byte(EmbeddedSDKSource)
+	}
+
+	// 2. Manage top-level go.mod
+	if modBytes, hasMod := result["go.mod"]; hasMod {
+		modContent := string(modBytes)
+		if !strings.Contains(modContent, "replace actionscat") {
+			if !strings.HasSuffix(modContent, "\n") {
+				modContent += "\n"
+			}
+			modContent += "\nreplace actionscat => ./_sdk\n"
+			result["go.mod"] = []byte(modContent)
+		}
+	} else {
+		defaultMod := "module action\n\ngo 1.25.3\n\nrequire actionscat v0.0.0\n\nreplace actionscat => ./_sdk\n"
+		result["go.mod"] = []byte(defaultMod)
+	}
+
+	return result
 }

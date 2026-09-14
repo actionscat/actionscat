@@ -101,7 +101,8 @@ func (b *Builder) BuildVersion(ctx context.Context, actionID, versionID string) 
 		return buildRecord, fmt.Errorf("failed to create builder sandbox: %w", err)
 	}
 
-	// 4. Upload source files into sandbox
+	// 4. Inject SDK and upload source files into sandbox
+	sourceFiles = InjectSDK(sourceFiles)
 	if err := b.sandbox.UploadFiles(ctx, sessionID, sourceFiles); err != nil {
 		completedAt := time.Now().UTC()
 		_ = b.store.UpdateBuildResult(ctx, buildID, domain.BuildStatusFailed, "", "", err.Error(), nil, "", "", 0, completedAt)
@@ -120,8 +121,8 @@ func (b *Builder) BuildVersion(ctx context.Context, actionID, versionID string) 
 	buildRecord.ToolchainVersion = toolchainVersion
 
 	// 6. Execute Build Spec Command
-	// Ensure /sandbox/out exists and link /out to /sandbox/out for root path compatibility
-	cmd := fmt.Sprintf("mkdir -p /sandbox/out /out && ln -sf /sandbox/out/entrypoint /out/entrypoint 2>/dev/null; cd /sandbox && %s", ver.BuildSpec.Command)
+	// Ensure /sandbox/out exists; canonical artifact target is /sandbox/out/entrypoint
+	cmd := fmt.Sprintf("mkdir -p /sandbox/out && cd /sandbox && %s", ver.BuildSpec.Command)
 	buildTimeout := 5 * time.Minute
 
 	execRes, err := b.sandbox.Exec(ctx, sandbox.ExecRequest{
@@ -151,8 +152,8 @@ func (b *Builder) BuildVersion(ctx context.Context, actionID, versionID string) 
 		return buildRecord, nil
 	}
 
-	// 7. Export built artifact files from /sandbox/out, /out, or /sandbox
-	exported, err := b.sandbox.ExportFiles(ctx, sessionID, []string{"/sandbox/out/entrypoint", "/out/entrypoint", "entrypoint", "out/entrypoint"})
+	// 7. Export built artifact files from /sandbox/out or /sandbox
+	exported, err := b.sandbox.ExportFiles(ctx, sessionID, []string{"/sandbox/out/entrypoint", "out/entrypoint", "entrypoint"})
 	if err != nil || len(exported) == 0 {
 		status := domain.BuildStatusFailed
 		buildRecord.Status = status

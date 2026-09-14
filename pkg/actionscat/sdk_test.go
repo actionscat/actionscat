@@ -56,7 +56,10 @@ func TestSDK_WriteStateAndSendMessage(t *testing.T) {
 
 	t.Setenv("ACTIONSCAT_RUNTIME_ENDPOINT", srv.URL)
 	t.Setenv("ACTIONSCAT_RUNTIME_TOKEN", "mock-token-xyz")
-	t.Setenv("ACTIONSCAT_EVENT_SESSION_ID", "session_999")
+	t.Setenv("ACTIONSCAT_EVENT_PLATFORM", "qq")
+	t.Setenv("ACTIONSCAT_EVENT_GROUP_ID", "grp_101")
+	t.Setenv("ACTIONSCAT_EVENT_USER_ID", "usr_202")
+	t.Setenv("ACTIONSCAT_EVENT_SESSION_ID", "grp_101:usr_202")
 
 	ctx := t.Context()
 
@@ -72,13 +75,32 @@ func TestSDK_WriteStateAndSendMessage(t *testing.T) {
 		t.Errorf("state payload mismatch: %+v", receivedStateReq)
 	}
 
-	// 2. Reply test
+	// 2. Reply test (canonical transport routing)
 	err = Reply(ctx, "pong response")
 	if err != nil {
 		t.Fatalf("reply failed: %v", err)
 	}
-	if receivedSendReq["session"] != "session_999" {
+	if receivedSendReq["session"] != "grp_101:usr_202" {
 		t.Errorf("session mismatch: %+v", receivedSendReq)
+	}
+	if receivedSendReq["platform"] != "qq" {
+		t.Errorf("expected platform 'qq', got %+v", receivedSendReq["platform"])
+	}
+	if receivedSendReq["message_type"] != "group" {
+		t.Errorf("expected message_type 'group', got %+v", receivedSendReq["message_type"])
+	}
+	if receivedSendReq["target_id"] != "grp_101" {
+		t.Errorf("expected target_id 'grp_101', got %+v", receivedSendReq["target_id"])
+	}
+
+	// 3. Reply private message routing test
+	t.Setenv("ACTIONSCAT_EVENT_GROUP_ID", "")
+	err = Reply(ctx, "private reply")
+	if err != nil {
+		t.Fatalf("reply failed: %v", err)
+	}
+	if receivedSendReq["message_type"] != "private" || receivedSendReq["target_id"] != "usr_202" {
+		t.Errorf("expected private target 'usr_202', got %+v", receivedSendReq)
 	}
 }
 

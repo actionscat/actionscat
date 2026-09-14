@@ -3,9 +3,9 @@
   "description": "Deterministic Maimai check-in / check-out attendance tracker using ActionsCat persistent state",
   "build_spec": {
     "language": "go",
-    "go_version": "1.24",
-    "build_command": "go build -o /out/entrypoint main.go",
-    "toolchain_profile": "go-builder"
+    "toolchain_requirement": ">= 1.25",
+    "command": "go build -o /sandbox/out/entrypoint .",
+    "network": false
   },
   "runtime_spec": {
     "entrypoint": "entrypoint",

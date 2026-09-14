@@ -217,3 +217,39 @@ func TestBuildLifecycle_ToolchainRebuildAndWarning(t *testing.T) {
 		t.Fatal("expected warning to be cleared after rebuilding and activating")
 	}
 }
+
+func TestInjectSDK(t *testing.T) {
+	t.Run("auto injects sdk when no go.mod provided", func(t *testing.T) {
+		src := map[string][]byte{
+			"main.go": []byte("package main\nimport \"actionscat/pkg/actionscat\"\nfunc main() {}\n"),
+		}
+		injected := InjectSDK(src)
+
+		if _, ok := injected["_sdk/go.mod"]; !ok {
+			t.Fatal("expected _sdk/go.mod to be injected")
+		}
+		if _, ok := injected["_sdk/pkg/actionscat/sdk.go"]; !ok {
+			t.Fatal("expected _sdk/pkg/actionscat/sdk.go to be injected")
+		}
+		if modBytes, ok := injected["go.mod"]; !ok || !strings.Contains(string(modBytes), "replace actionscat => ./_sdk") {
+			t.Fatalf("expected go.mod with replace directive, got: %s", string(modBytes))
+		}
+	})
+
+	t.Run("appends replace directive to existing go.mod", func(t *testing.T) {
+		src := map[string][]byte{
+			"main.go": []byte("package main\nfunc main() {}\n"),
+			"go.mod":  []byte("module my_action\n\ngo 1.25.3\n"),
+		}
+		injected := InjectSDK(src)
+
+		modContent := string(injected["go.mod"])
+		if !strings.Contains(modContent, "module my_action") {
+			t.Fatal("expected user module to be preserved")
+		}
+		if !strings.Contains(modContent, "replace actionscat => ./_sdk") {
+			t.Fatalf("expected replace directive appended, got: %s", modContent)
+		}
+	})
+}
+
