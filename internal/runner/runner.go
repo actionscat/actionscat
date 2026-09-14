@@ -81,6 +81,14 @@ func NewRunner(
 	}
 }
 
+// SetEndpoints dynamically updates the runtime endpoints (e.g. in test or container topology reconfiguration).
+func (r *Runner) SetEndpoints(runtimeEndpoint, advertisedEndpoint string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.runtimeEndpoint = runtimeEndpoint
+	r.advertisedRuntimeEndpoint = advertisedEndpoint
+}
+
 func randomRunID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
@@ -326,10 +334,12 @@ func (r *Runner) executeRun(ctx context.Context, run *domain.Run) {
 	}()
 
 	// Determine advertised runtime endpoint for the sandbox callback topology
+	r.mu.Lock()
 	effectiveEndpoint := r.advertisedRuntimeEndpoint
 	if effectiveEndpoint == "" {
 		effectiveEndpoint = r.runtimeEndpoint
 	}
+	r.mu.Unlock()
 
 	// Check for container network topology issues
 	if strings.Contains(effectiveEndpoint, "127.0.0.1") || strings.Contains(effectiveEndpoint, "localhost") {
