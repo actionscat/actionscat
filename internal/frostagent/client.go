@@ -72,6 +72,10 @@ type SendMessageRequest struct {
 	Messages    []OutgoingMessage `json:"messages,omitempty"`     // segmented message list
 	InstanceID  string            `json:"instance_id,omitempty"`  // optional FrostAgent multi-instance routing ID
 	Metadata    map[string]any    `json:"metadata,omitempty"`
+
+	// Element compatibility fields at top-level
+	Type string `json:"type,omitempty"`
+	Text string `json:"text,omitempty"`
 }
 
 type Client interface {
@@ -118,26 +122,87 @@ func NewHTTPClient(cfg Config) *HTTPClient {
 	}
 }
 
-func (c *HTTPClient) SendMessage(ctx context.Context, req SendMessageRequest) error {
-	if len(req.Messages) == 0 && strings.TrimSpace(req.Content) == "" && len(req.Attachments) == 0 {
-		return fmt.Errorf("%w: messages, content, or attachments cannot be empty", ErrInvalidRequest)
+// NormalizeSendMessageRequest canonicalizes an incoming SendMessageRequest:
+// 1. Parses session strings ("platform:message_type:target_id") into fallback routing fields.
+// 2. Ensures MessageType defaults to "group" if not otherwise specified.
+// 3. Normalizes Content/Text element compatibility fields across Messages.
+func NormalizeSendMessageRequest(req *SendMessageRequest) error {
+	if req.Session != "" {
+		parts := strings.Split(req.Session, ":")
+		if len(parts) >= 3 {
+			if req.Platform == "" {
+				req.Platform = strings.TrimSpace(parts[0])
+			}
+			if req.MessageType == "" {
+				req.MessageType = strings.TrimSpace(parts[1])
+			}
+			if req.TargetID == "" {
+				req.TargetID = strings.TrimSpace(strings.Join(parts[2:], ":"))
+			}
+		}
+	}
+	if req.MessageType == "" {
+		req.MessageType = "group"
 	}
 
-	// Canonical message normalization:
-	// If Messages is empty but Content or Attachments is provided, construct canonical OutgoingMessage element
 	if len(req.Messages) == 0 {
+		content := req.Content
+		if content == "" && req.Text != "" {
+			content = req.Text
+		}
+
+		if strings.TrimSpace(content) == "" && len(req.Attachments) == 0 {
+			return fmt.Errorf("%w: messages, content, or attachments cannot be empty", ErrInvalidRequest)
+		}
+
 		req.Messages = []OutgoingMessage{
 			{
 				TargetID:    req.TargetID,
 				MessageType: req.MessageType,
 				Platform:    req.Platform,
-				Content:     req.Content,
+				Content:     content,
 				Attachments: req.Attachments,
 				Metadata:    req.Metadata,
 				Type:        "plain",
-				Text:        req.Content,
+				Text:        content,
 			},
 		}
+		return nil
+	}
+
+	for i := range req.Messages {
+		if req.Messages[i].Platform == "" {
+			req.Messages[i].Platform = req.Platform
+		}
+		if req.Messages[i].MessageType == "" {
+			req.Messages[i].MessageType = req.MessageType
+		}
+		if req.Messages[i].MessageType == "" {
+			req.Messages[i].MessageType = "group"
+		}
+		if req.Messages[i].TargetID == "" {
+			req.Messages[i].TargetID = req.TargetID
+		}
+		if req.Messages[i].Content == "" && req.Messages[i].Text != "" {
+			req.Messages[i].Content = req.Messages[i].Text
+		}
+		if req.Messages[i].Type == "image" || req.Messages[i].Type == "file" || req.Messages[i].Type == "video" || req.Messages[i].Type == "audio" {
+			if (req.Messages[i].URL != "" || req.Messages[i].Path != "") && len(req.Messages[i].Attachments) == 0 {
+				req.Messages[i].Attachments = append(req.Messages[i].Attachments, Attachment{
+					Type: AttachmentType(req.Messages[i].Type),
+					URL:  req.Messages[i].URL,
+					Name: req.Messages[i].Path,
+				})
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *HTTPClient) SendMessage(ctx context.Context, req SendMessageRequest) error {
+	if err := NormalizeSendMessageRequest(&req); err != nil {
+		return err
 	}
 
 	payloadBytes, err := json.Marshal(req)

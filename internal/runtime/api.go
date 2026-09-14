@@ -187,6 +187,12 @@ func (a *API) HandleFrostAgentSend(c *gin.Context) {
 	}
 	req.InstanceID = ""
 
+	// Canonical message normalization across Session / Content / Messages
+	if err := frostagent.NormalizeSendMessageRequest(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid message request: " + err.Error()})
+		return
+	}
+
 	if len(req.Messages) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "messages cannot be empty"})
 		return

@@ -176,11 +176,11 @@ func setupMockCodeInterpreterServer(t *testing.T, expectedAuthToken string) (*ht
 					resp.ExitCode = &errExitState
 					resp.Stderr = fmt.Sprintf("failed to write state: err=%v, code=%v", err, stateResp.StatusCode)
 				} else {
-					// 3. Simulate Action executing: Action calls Core Runtime API to send message via FrostAgent
+					// 3. Simulate Action executing: Action calls Core Runtime API to send message via FrostAgent.
+					// CRITICAL CONTRACT CHECK: Test canonical ActionsCat SDK payload format:
+					// {"session": "qq:group:mock_target_group_999", "messages": [{"type": "plain", "text": "..."}]}
 					faBody := `{
-						"platform": "qq",
-						"message_type": "group",
-						"target_id": "mock_target_group_999",
+						"session": "qq:group:mock_target_group_999",
 						"messages": [
 							{"type": "plain", "text": "E2E: Action executed successfully and state updated."}
 						]

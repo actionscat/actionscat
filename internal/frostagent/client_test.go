@@ -168,3 +168,78 @@ func TestHTTPClient_Errors(t *testing.T) {
 		t.Fatal("expected error on 500 response")
 	}
 }
+
+func TestNormalizeSendMessageRequest(t *testing.T) {
+	t.Run("session parsing with top level content", func(t *testing.T) {
+		req := SendMessageRequest{
+			Session: "qq:group:grp_101",
+			Content: "hello world",
+		}
+		if err := NormalizeSendMessageRequest(&req); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if req.Platform != "qq" || req.MessageType != "group" || req.TargetID != "grp_101" {
+			t.Fatalf("unexpected parsed session fields: %+v", req)
+		}
+		if len(req.Messages) != 1 || req.Messages[0].Content != "hello world" {
+			t.Fatalf("unexpected normalized messages: %+v", req.Messages)
+		}
+	})
+
+	t.Run("actionscat sdk format session and messages with text", func(t *testing.T) {
+		// Matches actionscat.Reply and actionscat.SendMessage payload
+		req := SendMessageRequest{
+			Session: "onebot:private:user_202",
+			Messages: []OutgoingMessage{
+				{Type: "plain", Text: "text from sdk"},
+			},
+		}
+		if err := NormalizeSendMessageRequest(&req); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if req.Platform != "onebot" || req.MessageType != "private" || req.TargetID != "user_202" {
+			t.Fatalf("unexpected top-level fields: %+v", req)
+		}
+		if len(req.Messages) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(req.Messages))
+		}
+		msg := req.Messages[0]
+		if msg.Platform != "onebot" || msg.MessageType != "private" || msg.TargetID != "user_202" {
+			t.Fatalf("expected msg to inherit session routing, got %+v", msg)
+		}
+		if msg.Content != "text from sdk" {
+			t.Fatalf("expected Content to be populated from Text, got %q", msg.Content)
+		}
+	})
+
+	t.Run("media message attachments normalization", func(t *testing.T) {
+		req := SendMessageRequest{
+			Session: "telegram:channel:chan_303",
+			Messages: []OutgoingMessage{
+				{Type: "image", URL: "https://example.com/pic.png", Text: "caption text"},
+			},
+		}
+		if err := NormalizeSendMessageRequest(&req); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(req.Messages) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(req.Messages))
+		}
+		msg := req.Messages[0]
+		if msg.Content != "caption text" {
+			t.Fatalf("expected caption content, got %q", msg.Content)
+		}
+		if len(msg.Attachments) != 1 || msg.Attachments[0].Type != AttachmentTypeImage || msg.Attachments[0].URL != "https://example.com/pic.png" {
+			t.Fatalf("expected image attachment, got %+v", msg.Attachments)
+		}
+	})
+
+	t.Run("validation empty request", func(t *testing.T) {
+		req := SendMessageRequest{
+			Session: "qq:group:grp_404",
+		}
+		if err := NormalizeSendMessageRequest(&req); err == nil {
+			t.Fatal("expected error for empty message and content, got nil")
+		}
+	})
+}
