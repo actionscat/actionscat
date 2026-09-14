@@ -144,35 +144,56 @@ func setupMockCodeInterpreterServer(t *testing.T, expectedAuthToken string) (*ht
 		runtimeToken := sessReq.Env["ACTIONSCAT_RUNTIME_TOKEN"]
 
 		if runtimeEndpoint != "" && runtimeToken != "" && strings.Contains(req.Command, "chmod +x /sandbox/") {
-			// Simulate Action executing: Action calls Core Runtime API to write persistent state
-			stateBody := `{"path":"summary.json","data":"{\"status\":\"processed\",\"count\":100}"}`
-			stateReq, _ := http.NewRequest(http.MethodPost, runtimeEndpoint+"/state", strings.NewReader(stateBody))
-			stateReq.Header.Set("Content-Type", "application/json")
-			stateReq.Header.Set("Authorization", "Bearer "+runtimeToken)
 			client := &http.Client{Timeout: 5 * time.Second}
-			stateResp, err := client.Do(stateReq)
-			if err != nil || stateResp.StatusCode != http.StatusOK {
-				errExitState := 1
-				resp.ExitCode = &errExitState
-				resp.Stderr = fmt.Sprintf("failed to write state: err=%v, code=%v", err, stateResp.StatusCode)
+
+			// 1. Security Invariant check: Sandbox attempting to specify instance_id MUST be rejected with HTTP 400
+			evilFaBody := `{
+				"instance_id": "malicious_instance_override",
+				"platform": "qq",
+				"message_type": "group",
+				"target_id": "mock_target_group_999",
+				"messages": [
+					{"type": "plain", "text": "exploit attempt"}
+				]
+			}`
+			evilReq, _ := http.NewRequest(http.MethodPost, runtimeEndpoint+"/frostagent/send", strings.NewReader(evilFaBody))
+			evilReq.Header.Set("Content-Type", "application/json")
+			evilReq.Header.Set("Authorization", "Bearer "+runtimeToken)
+			evilResp, err := client.Do(evilReq)
+			if err != nil || evilResp.StatusCode != http.StatusBadRequest {
+				errExit := 1
+				resp.ExitCode = &errExit
+				resp.Stderr = fmt.Sprintf("expected HTTP 400 on instance_id override attempt, got code=%v, err=%v", evilResp.StatusCode, err)
 			} else {
-				// Simulate Action executing: Action calls Core Runtime API to send message via FrostAgent
-				faBody := `{
-					"platform": "qq",
-					"message_type": "group",
-					"target_id": "mock_target_group_999",
-					"messages": [
-						{"type": "plain", "text": "E2E: Action executed successfully and state updated."}
-					]
-				}`
-				faReq, _ := http.NewRequest(http.MethodPost, runtimeEndpoint+"/frostagent/send", strings.NewReader(faBody))
-				faReq.Header.Set("Content-Type", "application/json")
-				faReq.Header.Set("Authorization", "Bearer "+runtimeToken)
-				faResp, err := client.Do(faReq)
-				if err != nil || faResp.StatusCode != http.StatusOK {
-					errExitFA := 1
-					resp.ExitCode = &errExitFA
-					resp.Stderr = fmt.Sprintf("failed to send frostagent message: err=%v, code=%v", err, faResp.StatusCode)
+				// 2. Simulate Action executing: Action calls Core Runtime API to write persistent state
+				stateBody := `{"path":"summary.json","data":"{\"status\":\"processed\",\"count\":100}"}`
+				stateReq, _ := http.NewRequest(http.MethodPost, runtimeEndpoint+"/state", strings.NewReader(stateBody))
+				stateReq.Header.Set("Content-Type", "application/json")
+				stateReq.Header.Set("Authorization", "Bearer "+runtimeToken)
+				stateResp, err := client.Do(stateReq)
+				if err != nil || stateResp.StatusCode != http.StatusOK {
+					errExitState := 1
+					resp.ExitCode = &errExitState
+					resp.Stderr = fmt.Sprintf("failed to write state: err=%v, code=%v", err, stateResp.StatusCode)
+				} else {
+					// 3. Simulate Action executing: Action calls Core Runtime API to send message via FrostAgent
+					faBody := `{
+						"platform": "qq",
+						"message_type": "group",
+						"target_id": "mock_target_group_999",
+						"messages": [
+							{"type": "plain", "text": "E2E: Action executed successfully and state updated."}
+						]
+					}`
+					faReq, _ := http.NewRequest(http.MethodPost, runtimeEndpoint+"/frostagent/send", strings.NewReader(faBody))
+					faReq.Header.Set("Content-Type", "application/json")
+					faReq.Header.Set("Authorization", "Bearer "+runtimeToken)
+					faResp, err := client.Do(faReq)
+					if err != nil || faResp.StatusCode != http.StatusOK {
+						errExitFA := 1
+						resp.ExitCode = &errExitFA
+						resp.Stderr = fmt.Sprintf("failed to send frostagent message: err=%v, code=%v", err, faResp.StatusCode)
+					}
 				}
 			}
 		}
@@ -248,11 +269,16 @@ type mockFrostAgentState struct {
 	deliveredMessages []frostagent.SendMessageRequest
 }
 
-// TestCrossService_FullExecutionChain verifies the complete multi-service integration chain:
+// TestActionsCat_HTTPContractWiring verifies ActionsCat internal cross-component
+// HTTP contract wiring, capability token generation/revocation lifecycle, and proxy routing:
 //
-//	Chain 1: Action source -> code-interpreter go-builder -> Artifact -> action-runtime worker -> ActionsCat Runtime callback -> state.write
-//	Chain 2: Action runtime -> ActionsCat trusted proxy -> FrostAgent authenticated endpoint -> DefaultDispatcher -> adapter
-func TestCrossService_FullExecutionChain(t *testing.T) {
+//	Level 1 CI Fast Contract Test:
+//	1. Session creation & NetworkPolicy.Allow propagation across client boundary
+//	2. Profile fail-closed handling on builder and runtime worker provisioning
+//	3. Single-run capability token injection, scope verification, and immediate post-run revocation
+//	4. Runtime callback handling (StateStore write & server-side bound FrostAgent proxy delivery)
+//	5. Privilege escalation defenses (rejection of sandbox-specified instance_id, token scoping)
+func TestActionsCat_HTTPContractWiring(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -285,10 +311,11 @@ func TestCrossService_FullExecutionChain(t *testing.T) {
 	faServer, faState := setupMockFrostAgentServer(t, frostAgentKey, instanceID)
 
 	faClient := frostagent.NewHTTPClient(frostagent.Config{
-		BaseURL:    faServer.URL,
-		InstanceID: instanceID,
-		APIKey:     frostAgentKey,
-		Timeout:    5 * time.Second,
+		BaseURL:      faServer.URL,
+		InstanceID:   instanceID,
+		APIKey:       frostAgentKey,
+		SendEndpoint: "/api/v1/messages/send",
+		Timeout:      5 * time.Second,
 	})
 
 	// 3. Setup ActionsCat Core Server
@@ -384,9 +411,9 @@ func main() { fmt.Println("Action compiled and executed.") }
 		t.Fatalf("expected profile go-builder on build session, got %s", sbState.lastProfile)
 	}
 
-	// Store compiled artifact bundle
+	// Store compiled artifact bundle with a non-recursive entrypoint
 	artDigest, artPath, artSize, err := fs.SaveArtifactBundle(actionID, ver.ID, "bld_1", map[string][]byte{
-		"entrypoint": []byte("#!/bin/sh\n/sandbox/entrypoint\n"),
+		"entrypoint": []byte("#!/bin/sh\necho 'Action entrypoint starting...'\nexit 0\n"),
 	})
 	if err != nil {
 		t.Fatalf("save artifact bundle: %v", err)
@@ -552,5 +579,38 @@ func main() { fmt.Println("Action compiled and executed.") }
 		if tok.RevokedAt == nil {
 			t.Fatalf("expected token %s RevokedAt to be set, but it was nil", tok.ID)
 		}
+	}
+
+	// -------------------------------------------------------------
+	// STEP H: Verify NetworkPolicy.Allow propagation to Sandbox Gateway
+	// -------------------------------------------------------------
+	allowlistHandle, err := sbClient.CreateSession(ctx, sandbox.SessionRequest{
+		SessionID: "sess_verify_allowlist",
+		Profile:   sandbox.ProfileRuntime,
+		Network: domain.NetworkPolicy{
+			Mode: domain.NetworkModeAllowlist,
+			Allow: []domain.NetworkAllowRule{
+				{Host: "api.github.com", Port: 443},
+				{Host: "192.168.1.100", Port: 8080},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create allowlist session failed: %v", err)
+	}
+	if allowlistHandle == nil {
+		t.Fatal("expected non-nil handle for allowlist session")
+	}
+
+	userUUID := sbClient.SessionIDToUUID("sess_verify_allowlist")
+	sbState.mu.Lock()
+	allowSess := sbState.sessions[userUUID]
+	sbState.mu.Unlock()
+
+	if allowSess.Network != domain.NetworkModeAllowlist {
+		t.Fatalf("expected network mode allowlist, got %s", allowSess.Network)
+	}
+	if len(allowSess.AllowedHosts) != 2 || allowSess.AllowedHosts[0] != "api.github.com:443" || allowSess.AllowedHosts[1] != "192.168.1.100:8080" {
+		t.Fatalf("unexpected allowed hosts passed to gateway: %+v", allowSess.AllowedHosts)
 	}
 }

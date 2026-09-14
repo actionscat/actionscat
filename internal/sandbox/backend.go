@@ -4,6 +4,7 @@ import (
 	"actionscat/internal/domain"
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -44,8 +45,12 @@ func ValidateSessionRequest(req SessionRequest) error {
 		return ErrProfileNotSupported
 	}
 	switch req.Network.Mode {
-	case domain.NetworkModeNone, domain.NetworkModePublic, domain.NetworkModeAllowlist, domain.NetworkModeIsolated, "":
+	case domain.NetworkModeNone, domain.NetworkModePublic, domain.NetworkModeIsolated, "":
 		// valid network mode
+	case domain.NetworkModeAllowlist:
+		if len(req.Network.Allow) == 0 {
+			return fmt.Errorf("%w: allowlist network mode requires at least one allow rule", ErrInvalidRequest)
+		}
 	default:
 		return ErrInvalidRequest
 	}

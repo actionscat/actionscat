@@ -271,4 +271,19 @@ func TestRuntimeAPI_ScopeEnforcement(t *testing.T) {
 	if len(fa.SentMessages) != 1 || fa.SentMessages[0].Session != "group:123" {
 		t.Fatalf("message was not proxied to FrostAgent: %v", fa.SentMessages)
 	}
+
+	// 4. Sandbox attempting to specify instance_id MUST be rejected with 400
+	evilMsgReq := frostagent.SendMessageRequest{
+		Session:    "group:123",
+		InstanceID: "attacker_controlled_instance",
+		Messages:   []frostagent.MessageItem{{Type: "plain", Text: "escalate"}},
+	}
+	evilBytes, _ := json.Marshal(evilMsgReq)
+	req4 := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/frostagent/send", bytes.NewReader(evilBytes))
+	req4.Header.Set("Authorization", "Bearer "+tokenMsgOnly)
+	w4 := httptest.NewRecorder()
+	r.ServeHTTP(w4, req4)
+	if w4.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request when sandbox specifies instance_id, got %d", w4.Code)
+	}
 }

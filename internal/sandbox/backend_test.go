@@ -262,6 +262,54 @@ func TestClient_CreateSession_ContractFailClosed(t *testing.T) {
 	if !errors.Is(err, ErrProfileNotSupported) {
 		t.Fatalf("expected ErrProfileNotSupported for invalid profile, got: %v", err)
 	}
+
+	// 5. NetworkPolicy.Allow propagation across client boundary
+	returnStatus = http.StatusCreated
+	_, err = client.CreateSession(ctx, SessionRequest{
+		SessionID: "sess_allowlist",
+		Profile:   ProfileRuntime,
+		Network: domain.NetworkPolicy{
+			Mode: domain.NetworkModeAllowlist,
+			Allow: []domain.NetworkAllowRule{
+				{Host: "api.example.com", Port: 443},
+				{Host: "10.0.0.8", Port: 22},
+				{Host: "plain-host"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected successful allowlist CreateSession, got error: %v", err)
+	}
+	if receivedSessionReq.Network != domain.NetworkModeAllowlist {
+		t.Fatalf("expected network mode allowlist, got %s", receivedSessionReq.Network)
+	}
+	expectedHosts := []string{"api.example.com:443", "10.0.0.8:22", "plain-host"}
+	if len(receivedSessionReq.AllowedHosts) != len(expectedHosts) {
+		t.Fatalf("expected %d allowed hosts, got %d: %+v", len(expectedHosts), len(receivedSessionReq.AllowedHosts), receivedSessionReq.AllowedHosts)
+	}
+	for i, h := range expectedHosts {
+		if receivedSessionReq.AllowedHosts[i] != h {
+			t.Fatalf("expected allowed host %s at %d, got %s", h, i, receivedSessionReq.AllowedHosts[i])
+		}
+	}
+	if len(receivedSessionReq.NetworkRules) != 3 {
+		t.Fatalf("expected 3 structured network rules, got %d", len(receivedSessionReq.NetworkRules))
+	}
+
+	// 6. NetworkModeAllowlist without allow rules MUST FAIL CLOSED
+	_, err = client.CreateSession(ctx, SessionRequest{
+		SessionID: "sess_empty_allowlist",
+		Profile:   ProfileRuntime,
+		Network: domain.NetworkPolicy{
+			Mode: domain.NetworkModeAllowlist,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected empty allowlist to fail closed, got nil")
+	}
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected ErrInvalidRequest for empty allowlist, got: %v", err)
+	}
 }
 
 func containsStr(s, sub string) bool {

@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"actionscat/internal/domain"
 	"bytes"
 	"context"
 	"crypto/sha1"
@@ -95,13 +96,15 @@ func (c *Client) Health(ctx context.Context) error {
 }
 
 type gatewaySessionInitRequest struct {
-	UserUUID           string            `json:"user_uuid"`
-	Profile            string            `json:"profile,omitempty"`
-	Network            string            `json:"network,omitempty"`
-	MemoryLimitMB      int               `json:"memory_limit_mb,omitempty"`
-	CPULimit           float64           `json:"cpu_limit,omitempty"`
-	Env                map[string]string `json:"env,omitempty"`
-	RuntimeCallbackURL string            `json:"runtime_callback_url,omitempty"`
+	UserUUID           string                    `json:"user_uuid"`
+	Profile            string                    `json:"profile,omitempty"`
+	Network            string                    `json:"network,omitempty"`
+	AllowedHosts       []string                  `json:"allowed_hosts,omitempty"`
+	NetworkRules       []domain.NetworkAllowRule `json:"network_rules,omitempty"`
+	MemoryLimitMB      int                       `json:"memory_limit_mb,omitempty"`
+	CPULimit           float64                   `json:"cpu_limit,omitempty"`
+	Env                map[string]string         `json:"env,omitempty"`
+	RuntimeCallbackURL string                    `json:"runtime_callback_url,omitempty"`
 }
 
 func (c *Client) CreateSession(ctx context.Context, req SessionRequest) (*SessionHandle, error) {
@@ -119,10 +122,22 @@ func (c *Client) CreateSession(ctx context.Context, req SessionRequest) (*Sessio
 	// ActionsCat must not silently degrade into unconstrained sandbox workers if
 	// the gateway does not implement or rejects the requested profile/session contract.
 	initURL := c.baseURL + "/api/v1/sessions"
+
+	var allowedHosts []string
+	for _, rule := range req.Network.Allow {
+		if rule.Port > 0 {
+			allowedHosts = append(allowedHosts, fmt.Sprintf("%s:%d", rule.Host, rule.Port))
+		} else if rule.Host != "" {
+			allowedHosts = append(allowedHosts, rule.Host)
+		}
+	}
+
 	initBody, err := json.Marshal(gatewaySessionInitRequest{
 		UserUUID:           userUUID,
 		Profile:            req.Profile,
 		Network:            req.Network.Mode,
+		AllowedHosts:       allowedHosts,
+		NetworkRules:       req.Network.Allow,
 		MemoryLimitMB:      req.MemoryLimitMB,
 		CPULimit:           req.CPULimit,
 		Env:                req.Env,

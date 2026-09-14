@@ -177,6 +177,16 @@ func (a *API) HandleFrostAgentSend(c *gin.Context) {
 		return
 	}
 
+	// SECURITY INVARIANT:
+	// The sandbox/action MUST NOT dictate the FrostAgent instance_id.
+	// Instance routing must be bound strictly server-side by Core's trusted configuration.
+	// Reject requests attempting to pass instance_id to prevent privilege escalation.
+	if strings.TrimSpace(req.InstanceID) != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "instance_id cannot be specified by sandbox; instance routing is bound server-side"})
+		return
+	}
+	req.InstanceID = ""
+
 	if len(req.Messages) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "messages cannot be empty"})
 		return
