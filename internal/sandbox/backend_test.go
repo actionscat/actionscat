@@ -4,6 +4,7 @@ import (
 	"actionscat/internal/domain"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -169,6 +170,97 @@ func TestClient_UUIDDerivationAndGatewayMock(t *testing.T) {
 	// Release
 	if err := client.Release(ctx, "session_42"); err != nil {
 		t.Fatalf("Release() failed: %v", err)
+	}
+}
+
+func TestClient_CreateSession_ContractFailClosed(t *testing.T) {
+	ctx := context.Background()
+
+	var receivedSessionReq gatewaySessionInitRequest
+	var returnStatus int = http.StatusCreated
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/status":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/api/v1/sessions":
+			if returnStatus != http.StatusNotFound {
+				_ = json.NewDecoder(r.Body).Decode(&receivedSessionReq)
+			}
+			w.WriteHeader(returnStatus)
+			if returnStatus >= 400 {
+				_, _ = w.Write([]byte(`{"error":"profile contract not supported"}`))
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		BaseURL:          server.URL,
+		AuthToken:        "tok",
+		SessionNamespace: "test",
+		ClientTimeout:    2 * time.Second,
+	})
+
+	// 1. Success with profile and advertised callback URL
+	returnStatus = http.StatusCreated
+	handle, err := client.CreateSession(ctx, SessionRequest{
+		SessionID:          "sess_1",
+		Profile:            ProfileRuntime,
+		Network:            domain.NetworkPolicy{Mode: domain.NetworkModeIsolated},
+		RuntimeCallbackURL: "http://host.docker.internal:7999/api/v1/runtime",
+	})
+	if err != nil {
+		t.Fatalf("expected successful CreateSession, got error: %v", err)
+	}
+	if handle == nil || handle.SessionID != "sess_1" {
+		t.Fatalf("unexpected handle: %+v", handle)
+	}
+	if receivedSessionReq.Profile != ProfileRuntime ||
+		receivedSessionReq.Network != domain.NetworkModeIsolated ||
+		receivedSessionReq.RuntimeCallbackURL != "http://host.docker.internal:7999/api/v1/runtime" {
+		t.Fatalf("gateway did not receive expected contract parameters: %+v", receivedSessionReq)
+	}
+
+	// 2. Gateway returns 404 -> MUST FAIL CLOSED with ErrProfileNotSupported!
+	returnStatus = http.StatusNotFound
+	_, err = client.CreateSession(ctx, SessionRequest{
+		SessionID: "sess_2",
+		Profile:   ProfileGoBuilder,
+	})
+	if err == nil {
+		t.Fatal("expected error on 404 response, got nil")
+	}
+	if !errors.Is(err, ErrProfileNotSupported) {
+		t.Fatalf("expected ErrProfileNotSupported on 404, got: %v", err)
+	}
+
+	// 3. Gateway returns 400/422 -> MUST FAIL CLOSED with ErrProfileNotSupported!
+	returnStatus = http.StatusBadRequest
+	_, err = client.CreateSession(ctx, SessionRequest{
+		SessionID: "sess_3",
+		Profile:   ProfileMinimal,
+	})
+	if err == nil {
+		t.Fatal("expected error on 400 response, got nil")
+	}
+	if !errors.Is(err, ErrProfileNotSupported) {
+		t.Fatalf("expected ErrProfileNotSupported on 400, got: %v", err)
+	}
+
+	// 4. Invalid profile locally -> MUST FAIL CLOSED with ErrProfileNotSupported!
+	_, err = client.CreateSession(ctx, SessionRequest{
+		SessionID: "sess_4",
+		Profile:   "unsupported-arbitrary-profile",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid profile, got nil")
+	}
+	if !errors.Is(err, ErrProfileNotSupported) {
+		t.Fatalf("expected ErrProfileNotSupported for invalid profile, got: %v", err)
 	}
 }
 

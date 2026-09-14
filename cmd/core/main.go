@@ -61,12 +61,18 @@ func main() {
 	faClient := frostagent.NewHTTPClient(frostagent.Config{
 		BaseURL:      faEndpoint,
 		SendEndpoint: os.Getenv("FROSTAGENT_SEND_ENDPOINT"),
+		InstanceID:   os.Getenv("FROSTAGENT_INSTANCE_ID"),
 		APIKey:       os.Getenv("FROSTAGENT_API_KEY"),
 	})
 
 	runtimeEndpoint := os.Getenv("ACTIONSCAT_RUNTIME_ENDPOINT")
 	if runtimeEndpoint == "" {
 		runtimeEndpoint = "http://127.0.0.1:7999/api/v1/runtime"
+	}
+
+	advertisedRuntimeEndpoint := os.Getenv("ACTIONSCAT_RUNTIME_ADVERTISED_ENDPOINT")
+	if advertisedRuntimeEndpoint == "" {
+		advertisedRuntimeEndpoint = os.Getenv("ACTIONSCAT_ADVERTISED_RUNTIME_ENDPOINT")
 	}
 
 	workers := 8
@@ -81,15 +87,22 @@ func main() {
 		mgmtToken = os.Getenv("ACTIONSCAT_API_KEY")
 	}
 
+	dispatchToken := os.Getenv("ACTIONSCAT_DISPATCH_TOKEN")
+	if dispatchToken == "" {
+		dispatchToken = os.Getenv("ACTIONSCAT_INGRESS_TOKEN")
+	}
+
 	server := api.NewServer(api.ServerConfig{
-		Store:           sqliteStore,
-		FileStore:       fileStore,
-		StateStore:      stateStore,
-		Sandbox:         sandboxBackend,
-		FrostAgent:      faClient,
-		RuntimeEndpoint: runtimeEndpoint,
-		RunnerWorkers:   workers,
-		ManagementToken: mgmtToken,
+		Store:                     sqliteStore,
+		FileStore:                 fileStore,
+		StateStore:                stateStore,
+		Sandbox:                   sandboxBackend,
+		FrostAgent:                faClient,
+		RuntimeEndpoint:           runtimeEndpoint,
+		AdvertisedRuntimeEndpoint: advertisedRuntimeEndpoint,
+		RunnerWorkers:             workers,
+		ManagementToken:           mgmtToken,
+		DispatchToken:             dispatchToken,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

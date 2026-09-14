@@ -42,7 +42,8 @@ func setupDispatchTest(t *testing.T) (*store.SQLiteStore, *store.FileStore, *gin
 	handler := NewDispatchHandler(eng)
 
 	router := gin.New()
-	router.POST("/v1/dispatch", handler.HandleDispatch)
+	router.POST("/v1/dispatch", DispatchAuthMiddleware("test-dispatch-token", "test-mgmt-token", st), handler.HandleDispatch)
+	router.POST("/api/v1/dispatch", DispatchAuthMiddleware("test-dispatch-token", "test-mgmt-token", st), handler.HandleDispatch)
 
 	return st, fs, router
 }
@@ -125,6 +126,7 @@ func TestDispatchHandler_LegacyAndModernEvents(t *testing.T) {
 	b1, _ := json.Marshal(legacyBody)
 	req1 := httptest.NewRequest(http.MethodPost, "/v1/dispatch", bytes.NewReader(b1))
 	req1.Header.Set("Content-Type", "application/json")
+	req1.Header.Set("Authorization", "Bearer test-dispatch-token")
 	w1 := httptest.NewRecorder()
 	router.ServeHTTP(w1, req1)
 
@@ -148,6 +150,7 @@ func TestDispatchHandler_LegacyAndModernEvents(t *testing.T) {
 	b2, _ := json.Marshal(modernBody)
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/dispatch", bytes.NewReader(b2))
 	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer test-dispatch-token")
 	w2 := httptest.NewRecorder()
 	router.ServeHTTP(w2, req2)
 
@@ -168,6 +171,7 @@ func TestDispatchHandler_LegacyAndModernEvents(t *testing.T) {
 	b3, _ := json.Marshal(unmatchedBody)
 	req3 := httptest.NewRequest(http.MethodPost, "/v1/dispatch", bytes.NewReader(b3))
 	req3.Header.Set("Content-Type", "application/json")
+	req3.Header.Set("Authorization", "Bearer test-dispatch-token")
 	w3 := httptest.NewRecorder()
 	router.ServeHTTP(w3, req3)
 
@@ -175,5 +179,119 @@ func TestDispatchHandler_LegacyAndModernEvents(t *testing.T) {
 	_ = json.Unmarshal(w3.Body.Bytes(), &resp3)
 	if !resp3.OK || resp3.Matched || len(resp3.RunIDs) != 0 {
 		t.Fatalf("expected unmatched event with 0 runs, got %+v", resp3)
+	}
+}
+
+func TestDispatch_Authentication(t *testing.T) {
+	st, fs, router := setupDispatchTest(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	createDispatchAction(t, st, fs, "act_dispatch_auth")
+
+	dispatchPayload := map[string]string{
+		"sender_qq":     "123456",
+		"current_group": "654321",
+		"raw_msg":       "hello world",
+	}
+	bodyBytes, _ := json.Marshal(dispatchPayload)
+
+	// 1. Missing Token -> 401 Unauthorized
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/dispatch", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized on missing token, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 2. Forged Token -> 401 Unauthorized
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/dispatch", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer forged-dispatch-token")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized on forged token, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 3. Capability Token Escalation Prevention -> 403 Forbidden!
+	testAct := &domain.Action{
+		ID:             "act_for_token",
+		Name:           "for-token",
+		MaxConcurrency: 1,
+		Enabled:        true,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	_ = st.CreateAction(ctx, testAct)
+	testVer := &domain.ActionVersion{
+		ID:            "ver_for_token",
+		ActionID:      testAct.ID,
+		VersionNumber: 1,
+		CreatedAt:     now,
+	}
+	_ = st.CreateVersion(ctx, testVer)
+	testBld := &domain.ArtifactBuild{
+		ID:          "bld_for_token",
+		ActionID:    testAct.ID,
+		VersionID:   testVer.ID,
+		BuildNumber: 1,
+		Status:      domain.BuildStatusSucceeded,
+		CreatedAt:   now,
+	}
+	_ = st.CreateBuild(ctx, testBld)
+	testRun := &domain.Run{
+		ID:              "run_for_token",
+		ActionID:        testAct.ID,
+		ActionVersionID: testVer.ID,
+		ArtifactBuildID: testBld.ID,
+		Status:          domain.RunStatusRunning,
+		TriggerType:     domain.TriggerTypeManual,
+		CreatedAt:       now,
+	}
+	_ = st.CreateRun(ctx, testRun)
+
+	rawCapToken, hash, _ := domain.GenerateRawToken()
+	runTok := &domain.RunToken{
+		ID:        "tok_dispatch_test",
+		TokenHash: hash,
+		RunID:     testRun.ID,
+		ActionID:  testAct.ID,
+		Scopes:    []string{domain.ScopeStateWrite},
+		ExpiresAt: now.Add(time.Hour),
+		CreatedAt: now,
+	}
+	if err := st.CreateRunToken(ctx, runTok); err != nil {
+		t.Fatalf("create run token: %v", err)
+	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/dispatch", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+rawCapToken)
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden when presenting Run Capability Token to dispatch API, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 4. Valid Dispatch Token via Header -> 200 OK
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/dispatch", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ActionsCat-Dispatch-Token", "test-dispatch-token")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK with valid dispatch token header, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 5. Valid Management Token as fallback -> 200 OK
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/dispatch", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-mgmt-token")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK with management fallback token, got %d: %s", w.Code, w.Body.String())
 	}
 }

@@ -8,10 +8,11 @@ import (
 )
 
 var (
-	ErrSessionNotFound    = errors.New("sandbox session not found")
-	ErrSandboxUnavailable = errors.New("sandbox infrastructure unavailable")
-	ErrExecutionFailed    = errors.New("sandbox execution failed")
-	ErrInvalidRequest     = errors.New("invalid sandbox request")
+	ErrSessionNotFound     = errors.New("sandbox session not found")
+	ErrSandboxUnavailable  = errors.New("sandbox infrastructure unavailable")
+	ErrExecutionFailed     = errors.New("sandbox execution failed")
+	ErrInvalidRequest      = errors.New("invalid sandbox request")
+	ErrProfileNotSupported = errors.New("sandbox backend does not support requested profile/session contract")
 )
 
 const (
@@ -22,12 +23,33 @@ const (
 
 // SessionRequest defines parameters to provision or configure an isolated sandbox session.
 type SessionRequest struct {
-	SessionID     string
-	Profile       string               // "go-builder", "action-runtime", "minimal"
-	Network       domain.NetworkPolicy // "none", "public", "allowlist"
-	MemoryLimitMB int
-	CPULimit      float64
-	Env           map[string]string
+	SessionID          string
+	Profile            string               // "go-builder", "action-runtime", "minimal"
+	Network            domain.NetworkPolicy // "none", "public", "allowlist", "isolated"
+	MemoryLimitMB      int
+	CPULimit           float64
+	Env                map[string]string
+	RuntimeCallbackURL string // Host-accessible runtime callback URL for sandboxed containers
+}
+
+// ValidateSessionRequest validates profile and network requirements before provisioning.
+func ValidateSessionRequest(req SessionRequest) error {
+	if req.SessionID == "" {
+		return ErrInvalidRequest
+	}
+	switch req.Profile {
+	case ProfileGoBuilder, ProfileRuntime, ProfileMinimal, "":
+		// valid profile
+	default:
+		return ErrProfileNotSupported
+	}
+	switch req.Network.Mode {
+	case domain.NetworkModeNone, domain.NetworkModePublic, domain.NetworkModeAllowlist, domain.NetworkModeIsolated, "":
+		// valid network mode
+	default:
+		return ErrInvalidRequest
+	}
+	return nil
 }
 
 // SessionHandle identifies an active sandbox session.

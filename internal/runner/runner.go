@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 )
@@ -29,19 +30,21 @@ var (
 )
 
 type Config struct {
-	MaxWorkers      int
-	RuntimeEndpoint string // e.g. "http://127.0.0.1:7999/api/v1/runtime"
-	PollInterval    time.Duration
+	MaxWorkers                int
+	RuntimeEndpoint           string // local/bind runtime endpoint, e.g. "http://127.0.0.1:7999/api/v1/runtime"
+	AdvertisedRuntimeEndpoint string // endpoint reachable from inside sandbox containers, e.g. "http://host.docker.internal:7999/api/v1/runtime"
+	PollInterval              time.Duration
 }
 
 type Runner struct {
-	store           *store.SQLiteStore
-	fileStore       *store.FileStore
-	stateStore      *store.StateStore
-	sandbox         sandbox.Backend
-	runtimeEndpoint string
-	maxWorkers      int
-	pollInterval    time.Duration
+	store                     *store.SQLiteStore
+	fileStore                 *store.FileStore
+	stateStore                *store.StateStore
+	sandbox                   sandbox.Backend
+	runtimeEndpoint           string
+	advertisedRuntimeEndpoint string
+	maxWorkers                int
+	pollInterval              time.Duration
 
 	wakeup chan struct{}
 	mu     sync.Mutex
@@ -66,14 +69,15 @@ func NewRunner(
 	}
 
 	return &Runner{
-		store:           store,
-		fileStore:       fileStore,
-		stateStore:      stateStore,
-		sandbox:         sandbox,
-		runtimeEndpoint: cfg.RuntimeEndpoint,
-		maxWorkers:      workers,
-		pollInterval:    poll,
-		wakeup:          make(chan struct{}, 1),
+		store:                     store,
+		fileStore:                 fileStore,
+		stateStore:                stateStore,
+		sandbox:                   sandbox,
+		runtimeEndpoint:           cfg.RuntimeEndpoint,
+		advertisedRuntimeEndpoint: cfg.AdvertisedRuntimeEndpoint,
+		maxWorkers:                workers,
+		pollInterval:              poll,
+		wakeup:                    make(chan struct{}, 1),
 	}
 }
 
@@ -321,20 +325,34 @@ func (r *Runner) executeRun(ctx context.Context, run *domain.Run) {
 		_ = r.sandbox.Release(context.Background(), sessionID)
 	}()
 
+	// Determine advertised runtime endpoint for the sandbox callback topology
+	effectiveEndpoint := r.advertisedRuntimeEndpoint
+	if effectiveEndpoint == "" {
+		effectiveEndpoint = r.runtimeEndpoint
+	}
+
+	// Check for container network topology issues
+	if strings.Contains(effectiveEndpoint, "127.0.0.1") || strings.Contains(effectiveEndpoint, "localhost") {
+		if len(ver.RuntimeCapabilities) > 0 {
+			log.Printf("[runner] WARNING: Run %s action has runtime capabilities %v but runtime endpoint is loopback (%s); container workers cannot reach ActionsCat host unless ACTIONSCAT_RUNTIME_ADVERTISED_ENDPOINT is set", run.ID, ver.RuntimeCapabilities, effectiveEndpoint)
+		}
+	}
+
 	// Assemble complete sandbox environment
 	sandboxEnv := make(map[string]string, len(run.PlannedEnv)+3)
 	maps.Copy(sandboxEnv, run.PlannedEnv)
 	sandboxEnv["ACTIONSCAT_RUN_ID"] = run.ID
-	sandboxEnv["ACTIONSCAT_RUNTIME_ENDPOINT"] = r.runtimeEndpoint
+	sandboxEnv["ACTIONSCAT_RUNTIME_ENDPOINT"] = effectiveEndpoint
 	sandboxEnv["ACTIONSCAT_RUNTIME_TOKEN"] = rawToken
 
 	_, err = r.sandbox.CreateSession(ctx, sandbox.SessionRequest{
-		SessionID:     sessionID,
-		Profile:       sandbox.ProfileRuntime,
-		Network:       ver.RuntimeSpec.Network,
-		MemoryLimitMB: ver.RuntimeSpec.MemoryLimitMB,
-		CPULimit:      ver.RuntimeSpec.CPULimit,
-		Env:           sandboxEnv,
+		SessionID:          sessionID,
+		Profile:            sandbox.ProfileRuntime,
+		Network:            ver.RuntimeSpec.Network,
+		MemoryLimitMB:      ver.RuntimeSpec.MemoryLimitMB,
+		CPULimit:           ver.RuntimeSpec.CPULimit,
+		Env:                sandboxEnv,
+		RuntimeCallbackURL: effectiveEndpoint,
 	})
 	if err != nil {
 		r.finishRun(ctx, run.ID, domain.RunStatusFailed, nil, "", "sandbox provision failed: "+err.Error(), startTime)

@@ -95,17 +95,18 @@ func (c *Client) Health(ctx context.Context) error {
 }
 
 type gatewaySessionInitRequest struct {
-	UserUUID      string            `json:"user_uuid"`
-	Profile       string            `json:"profile,omitempty"`
-	Network       string            `json:"network,omitempty"`
-	MemoryLimitMB int               `json:"memory_limit_mb,omitempty"`
-	CPULimit      float64           `json:"cpu_limit,omitempty"`
-	Env           map[string]string `json:"env,omitempty"`
+	UserUUID           string            `json:"user_uuid"`
+	Profile            string            `json:"profile,omitempty"`
+	Network            string            `json:"network,omitempty"`
+	MemoryLimitMB      int               `json:"memory_limit_mb,omitempty"`
+	CPULimit           float64           `json:"cpu_limit,omitempty"`
+	Env                map[string]string `json:"env,omitempty"`
+	RuntimeCallbackURL string            `json:"runtime_callback_url,omitempty"`
 }
 
 func (c *Client) CreateSession(ctx context.Context, req SessionRequest) (*SessionHandle, error) {
-	if req.SessionID == "" {
-		return nil, ErrInvalidRequest
+	if err := ValidateSessionRequest(req); err != nil {
+		return nil, err
 	}
 	userUUID := c.SessionIDToUUID(req.SessionID)
 
@@ -114,39 +115,54 @@ func (c *Client) CreateSession(ctx context.Context, req SessionRequest) (*Sessio
 		return nil, err
 	}
 
-	// Store session policy and settings locally
+	// Strictly enforce the code-interpreter contract fail-closed:
+	// ActionsCat must not silently degrade into unconstrained sandbox workers if
+	// the gateway does not implement or rejects the requested profile/session contract.
+	initURL := c.baseURL + "/api/v1/sessions"
+	initBody, err := json.Marshal(gatewaySessionInitRequest{
+		UserUUID:           userUUID,
+		Profile:            req.Profile,
+		Network:            req.Network.Mode,
+		MemoryLimitMB:      req.MemoryLimitMB,
+		CPULimit:           req.CPULimit,
+		Env:                req.Env,
+		RuntimeCallbackURL: req.RuntimeCallbackURL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal session request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, initURL, bytes.NewReader(initBody))
+	if err != nil {
+		return nil, fmt.Errorf("build session init request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Auth-Token", c.authToken)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrSandboxUnavailable, err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated, http.StatusNoContent:
+		// Gateway successfully provisioned and bound the session contract
+	case http.StatusNotFound:
+		// Gateway does not support the explicit session/profile contract -> Fail Closed!
+		return nil, fmt.Errorf("%w: gateway returned 404 on /api/v1/sessions", ErrProfileNotSupported)
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("%w: gateway rejected profile/network policy: %s", ErrProfileNotSupported, string(body))
+	default:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("%w: gateway returned HTTP %d on session init: %s", ErrSandboxUnavailable, resp.StatusCode, string(body))
+	}
+
+	// Store verified session policy and settings locally
 	c.mu.Lock()
 	c.sessions[req.SessionID] = req
 	c.mu.Unlock()
-
-	// Proactively notify the gateway if it supports explicit session initialization
-	initURL := c.baseURL + "/api/v1/sessions"
-	initBody, err := json.Marshal(gatewaySessionInitRequest{
-		UserUUID:      userUUID,
-		Profile:       req.Profile,
-		Network:       req.Network.Mode,
-		MemoryLimitMB: req.MemoryLimitMB,
-		CPULimit:      req.CPULimit,
-		Env:           req.Env,
-	})
-	if err == nil {
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, initURL, bytes.NewReader(initBody))
-		if err == nil {
-			httpReq.Header.Set("Content-Type", "application/json")
-			httpReq.Header.Set("X-Auth-Token", c.authToken)
-			if resp, err := c.httpClient.Do(httpReq); err == nil {
-				_ = resp.Body.Close()
-				// If 200/201/204 or 404 (endpoint not supported by gateway), proceed safely.
-				// If 401/403/500+, report failure
-				if resp.StatusCode != http.StatusOK &&
-					resp.StatusCode != http.StatusCreated &&
-					resp.StatusCode != http.StatusNoContent &&
-					resp.StatusCode != http.StatusNotFound {
-					return nil, fmt.Errorf("%w: gateway returned HTTP %d on session init", ErrSandboxUnavailable, resp.StatusCode)
-				}
-			}
-		}
-	}
 
 	return &SessionHandle{
 		SessionID: req.SessionID,

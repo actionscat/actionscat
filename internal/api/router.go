@@ -16,29 +16,33 @@ import (
 )
 
 type Server struct {
-	Store           *store.SQLiteStore
-	FileStore       *store.FileStore
-	StateStore      *store.StateStore
-	ActionService   *action.Service
-	Builder         *build.Builder
-	Runner          *runner.Runner
-	Scheduler       *scheduler.Scheduler
-	MatcherEngine   *matcher.Engine
-	RuntimeAPI      *runtime.API
-	ManagementAPI   *ManagementAPI
-	Dispatch        *DispatchHandler
-	ManagementToken string
+	Store                     *store.SQLiteStore
+	FileStore                 *store.FileStore
+	StateStore                *store.StateStore
+	ActionService             *action.Service
+	Builder                   *build.Builder
+	Runner                    *runner.Runner
+	Scheduler                 *scheduler.Scheduler
+	MatcherEngine             *matcher.Engine
+	RuntimeAPI                *runtime.API
+	ManagementAPI             *ManagementAPI
+	Dispatch                  *DispatchHandler
+	ManagementToken           string
+	DispatchToken             string
+	AdvertisedRuntimeEndpoint string
 }
 
 type ServerConfig struct {
-	Store           *store.SQLiteStore
-	FileStore       *store.FileStore
-	StateStore      *store.StateStore
-	Sandbox         sandbox.Backend
-	FrostAgent      frostagent.Client
-	RuntimeEndpoint string
-	RunnerWorkers   int
-	ManagementToken string
+	Store                     *store.SQLiteStore
+	FileStore                 *store.FileStore
+	StateStore                *store.StateStore
+	Sandbox                   sandbox.Backend
+	FrostAgent                frostagent.Client
+	RuntimeEndpoint           string
+	AdvertisedRuntimeEndpoint string
+	RunnerWorkers             int
+	ManagementToken           string
+	DispatchToken             string
 }
 
 func NewServer(cfg ServerConfig) *Server {
@@ -46,8 +50,9 @@ func NewServer(cfg ServerConfig) *Server {
 	builder := build.NewBuilder(cfg.Store, cfg.FileStore, cfg.Sandbox)
 
 	r := runner.NewRunner(cfg.Store, cfg.FileStore, cfg.StateStore, cfg.Sandbox, runner.Config{
-		MaxWorkers:      cfg.RunnerWorkers,
-		RuntimeEndpoint: cfg.RuntimeEndpoint,
+		MaxWorkers:                cfg.RunnerWorkers,
+		RuntimeEndpoint:           cfg.RuntimeEndpoint,
+		AdvertisedRuntimeEndpoint: cfg.AdvertisedRuntimeEndpoint,
 	})
 
 	sched := scheduler.NewScheduler(cfg.Store, r, scheduler.Config{})
@@ -57,18 +62,20 @@ func NewServer(cfg ServerConfig) *Server {
 	dispatchHandler := NewDispatchHandler(eng)
 
 	return &Server{
-		Store:           cfg.Store,
-		FileStore:       cfg.FileStore,
-		StateStore:      cfg.StateStore,
-		ActionService:   actSvc,
-		Builder:         builder,
-		Runner:          r,
-		Scheduler:       sched,
-		MatcherEngine:   eng,
-		RuntimeAPI:      runtimeAPI,
-		ManagementAPI:   mgmtAPI,
-		Dispatch:        dispatchHandler,
-		ManagementToken: cfg.ManagementToken,
+		Store:                     cfg.Store,
+		FileStore:                 cfg.FileStore,
+		StateStore:                cfg.StateStore,
+		ActionService:             actSvc,
+		Builder:                   builder,
+		Runner:                    r,
+		Scheduler:                 sched,
+		MatcherEngine:             eng,
+		RuntimeAPI:                runtimeAPI,
+		ManagementAPI:             mgmtAPI,
+		Dispatch:                  dispatchHandler,
+		ManagementToken:           cfg.ManagementToken,
+		DispatchToken:             cfg.DispatchToken,
+		AdvertisedRuntimeEndpoint: cfg.AdvertisedRuntimeEndpoint,
 	}
 }
 
@@ -79,9 +86,11 @@ func (s *Server) SetupRouter() *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// Legacy & Modern event dispatch endpoint
-	r.POST("/v1/dispatch", s.Dispatch.HandleDispatch)
-	r.POST("/api/v1/dispatch", s.Dispatch.HandleDispatch)
+	// Legacy & Modern event dispatch ingress endpoints
+	// Protected by dedicated DispatchAuthMiddleware with administrative management token fallback.
+	dispatchAuth := DispatchAuthMiddleware(s.DispatchToken, s.ManagementToken, s.Store)
+	r.POST("/v1/dispatch", dispatchAuth, s.Dispatch.HandleDispatch)
+	r.POST("/api/v1/dispatch", dispatchAuth, s.Dispatch.HandleDispatch)
 
 	// Runtime Capability API (called from inside Run Sandboxes)
 	runtimeGroup := r.Group("/api/v1/runtime")

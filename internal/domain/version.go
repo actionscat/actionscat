@@ -12,6 +12,14 @@ type BuildSpec struct {
 	Network              bool   `json:"network"`               // whether build requires public network access (e.g. go mod download)
 }
 
+// NetworkMode constants define sandbox network confinement modes.
+const (
+	NetworkModeNone      = "none"
+	NetworkModePublic    = "public"
+	NetworkModeAllowlist = "allowlist"
+	NetworkModeIsolated  = "isolated"
+)
+
 // NetworkAllowRule specifies a host and port allowlist entry.
 type NetworkAllowRule struct {
 	Host string `json:"host"`

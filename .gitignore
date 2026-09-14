@@ -24,5 +24,8 @@ Thumbs.db
 *.db
 /data/
 
+# Claude
+.claude/
+
 # OneDrive
 ~$*
