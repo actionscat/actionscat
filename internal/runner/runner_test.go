@@ -31,9 +31,10 @@ func setupTestRunner(t *testing.T, maxWorkers int) (
 	sb := sandbox.NewFakeBackend()
 
 	r := NewRunner(st, fs, ss, sb, Config{
-		MaxWorkers:      maxWorkers,
-		RuntimeEndpoint: "http://127.0.0.1:7999/api/v1/runtime",
-		PollInterval:    20 * time.Millisecond,
+		MaxWorkers:                maxWorkers,
+		RuntimeEndpoint:           "http://127.0.0.1:7999/api/v1/runtime",
+		AdvertisedRuntimeEndpoint: "http://10.0.0.1:7999/api/v1/runtime",
+		PollInterval:              20 * time.Millisecond,
 	})
 
 	return st, fs, ss, sb, r
@@ -370,5 +371,62 @@ func TestRunner_CrashRecoveryAndTokenRevocation(t *testing.T) {
 	}
 	if claimedAfter == nil || claimedAfter.ID != run2.ID {
 		t.Fatalf("expected run2 to be claimed now, got %v", claimedAfter)
+	}
+}
+
+func TestRunner_FailFast_LoopbackRuntimeCapabilities(t *testing.T) {
+	tempDir := t.TempDir()
+	db, err := store.OpenDB(filepath.Join(tempDir, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	st := store.NewSQLiteStore(db)
+	fs := store.NewFileStore(tempDir)
+	ss := store.NewStateStore(tempDir)
+	sb := sandbox.NewFakeBackend()
+
+	// Configure runner with loopback runtime endpoint and NO advertised endpoint
+	r := NewRunner(st, fs, ss, sb, Config{
+		MaxWorkers:      2,
+		RuntimeEndpoint: "http://127.0.0.1:7999/api/v1/runtime",
+		PollInterval:    20 * time.Millisecond,
+	})
+
+	ctx := t.Context()
+	// Action has runtime capabilities [state.write]
+	act, _, _ := createRunnableAction(t, st, fs, "act_failfast", 1, nil)
+
+	r.Start(ctx)
+	defer r.Stop()
+
+	run, err := r.CreateRun(ctx, CreateRunRequest{
+		ActionID:    act.ID,
+		TriggerType: domain.TriggerTypeManual,
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	// Poll until run completes (it should fail-fast without executing in sandbox)
+	var finishedRun *domain.Run
+	for range 50 {
+		rRecord, err := st.GetRun(ctx, run.ID)
+		if err == nil && (rRecord.Status == domain.RunStatusFailed || rRecord.Status == domain.RunStatusSucceeded) {
+			finishedRun = rRecord
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if finishedRun == nil {
+		t.Fatal("run did not finish in time")
+	}
+	if finishedRun.Status != domain.RunStatusFailed {
+		t.Fatalf("expected run status %s, got %s", domain.RunStatusFailed, finishedRun.Status)
+	}
+	if !strings.Contains(finishedRun.ErrorMessage, "loopback") || !strings.Contains(finishedRun.ErrorMessage, "ACTIONSCAT_RUNTIME_ADVERTISED_ENDPOINT") {
+		t.Fatalf("expected fail-fast loopback error message, got %q", finishedRun.ErrorMessage)
 	}
 }

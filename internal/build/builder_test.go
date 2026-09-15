@@ -6,6 +6,8 @@ import (
 	"actionscat/internal/sandbox"
 	"actionscat/internal/store"
 	"context"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -249,6 +251,118 @@ func TestInjectSDK(t *testing.T) {
 		}
 		if !strings.Contains(modContent, "replace actionscat => ./_sdk") {
 			t.Fatalf("expected replace directive appended, got: %s", modContent)
+		}
+	})
+
+	t.Run("overrides existing single-line replace directive (official example pattern)", func(t *testing.T) {
+		src := map[string][]byte{
+			"main.go": []byte("package main\nimport _ \"actionscat/pkg/actionscat\"\nfunc main() {}\n"),
+			"go.mod":  []byte("module maimai_recorder\n\ngo 1.25.3\n\nrequire actionscat v0.0.0\n\nreplace actionscat => ../../../\n"),
+		}
+		injected := InjectSDK(src)
+
+		modContent := string(injected["go.mod"])
+		if strings.Contains(modContent, "../../../") {
+			t.Fatalf("expected ../../../ replace to be stripped, got:\n%s", modContent)
+		}
+		if !strings.Contains(modContent, "replace actionscat => ./_sdk") {
+			t.Fatalf("expected canonical replace directive, got:\n%s", modContent)
+		}
+	})
+
+	t.Run("overrides replace inside replace block while preserving other replaces", func(t *testing.T) {
+		src := map[string][]byte{
+			"main.go": []byte("package main\nfunc main() {}\n"),
+			"go.mod": []byte("module test_action\n\ngo 1.25.3\n\nrequire actionscat v0.0.0\n\nreplace (\n\tactionscat => ../../../\n\tgithub.com/foo/bar => ../bar\n)\n"),
+		}
+		injected := InjectSDK(src)
+
+		modContent := string(injected["go.mod"])
+		if strings.Contains(modContent, "../../../") {
+			t.Fatalf("expected ../../../ replace to be stripped from block, got:\n%s", modContent)
+		}
+		if !strings.Contains(modContent, "github.com/foo/bar => ../bar") {
+			t.Fatalf("expected other replace to be preserved, got:\n%s", modContent)
+		}
+		if !strings.Contains(modContent, "replace actionscat => ./_sdk") {
+			t.Fatalf("expected canonical replace directive, got:\n%s", modContent)
+		}
+	})
+
+	t.Run("prunes empty replace block when actionscat was only entry", func(t *testing.T) {
+		src := map[string][]byte{
+			"main.go": []byte("package main\nfunc main() {}\n"),
+			"go.mod":  []byte("module test_action\n\ngo 1.25.3\n\nreplace (\n\tactionscat => ../../../\n)\n"),
+		}
+		injected := InjectSDK(src)
+
+		modContent := string(injected["go.mod"])
+		if strings.Contains(modContent, "../../../") {
+			t.Fatalf("expected ../../../ to be stripped, got:\n%s", modContent)
+		}
+		if strings.Contains(modContent, "replace (") {
+			t.Fatalf("expected empty replace block to be pruned, got:\n%s", modContent)
+		}
+		if !strings.Contains(modContent, "require actionscat v0.0.0") {
+			t.Fatalf("expected require actionscat to be added, got:\n%s", modContent)
+		}
+		if !strings.Contains(modContent, "replace actionscat => ./_sdk") {
+			t.Fatalf("expected canonical replace directive, got:\n%s", modContent)
+		}
+	})
+
+	t.Run("compiles user action hermetically with injected sdk using local go toolchain", func(t *testing.T) {
+		tempDir := t.TempDir()
+		// Simulate user code with relative replace directive from official examples
+		src := map[string][]byte{
+			"main.go": []byte(`package main
+
+import (
+	"actionscat/pkg/actionscat"
+	"fmt"
+)
+
+func main() {
+	ctx := actionscat.GetContext()
+	fmt.Printf("hello %s\n", ctx.ActionID)
+}
+`),
+			"go.mod": []byte("module maimai_recorder\n\ngo 1.25.3\n\nrequire actionscat v0.0.0\n\nreplace actionscat => ../../../nonexistent\n"),
+		}
+
+		injected := InjectSDK(src)
+
+		for relPath, content := range injected {
+			fullPath := filepath.Join(tempDir, filepath.FromSlash(relPath))
+			if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			if err := os.WriteFile(fullPath, content, 0644); err != nil {
+				t.Fatalf("write file: %v", err)
+			}
+		}
+
+		// Run go build in tempDir with GOPROXY=off to ensure strict hermetic build
+		cmd := exec.Command("go", "build", "-o", "output.bin", ".")
+		cmd.Dir = tempDir
+		cmd.Env = append(os.Environ(), "GOPROXY=off", "GO111MODULE=on")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("hermetic go build failed: %v\noutput: %s\ngenerated go.mod:\n%s", err, string(out), string(injected["go.mod"]))
+		}
+
+		binPath := filepath.Join(tempDir, "output.bin")
+		if _, err := os.Stat(binPath); err != nil {
+			binPath += ".exe"
+		}
+		runCmd := exec.Command(binPath)
+		runCmd.Env = append(os.Environ(), "ACTIONSCAT_ACTION_ID=act_hermetic_test")
+		runOut, err := runCmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("running built binary failed: %v\noutput: %s", err, string(runOut))
+		}
+		if !strings.Contains(string(runOut), "hello act_hermetic_test") {
+			t.Fatalf("unexpected binary output: %s", string(runOut))
 		}
 	})
 }

@@ -91,7 +91,7 @@ go build -o actionscat.exe ./cmd/core
 # 可选环境变量配置
 $env:ACTIONSCAT_ADDR = ":7999"
 $env:ACTIONSCAT_DATA_DIR = "./data"
-$env:FA_SANDBOX_ENDPOINT = "http://127.0.0.1:8080"
+$env:FA_SANDBOX_ENDPOINT = "http://127.0.0.1:3874"
 $env:FROSTAGENT_ENDPOINT = "http://127.0.0.1:8000"
 
 ./actionscat.exe

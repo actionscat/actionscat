@@ -47,7 +47,7 @@ func main() {
 
 	sandboxEndpoint := os.Getenv("FA_SANDBOX_ENDPOINT")
 	if sandboxEndpoint == "" {
-		sandboxEndpoint = "http://127.0.0.1:8080"
+		sandboxEndpoint = "http://127.0.0.1:3874"
 	}
 	sandboxBackend := sandbox.NewClient(sandbox.Config{
 		BaseURL:   sandboxEndpoint,

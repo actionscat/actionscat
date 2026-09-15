@@ -1,6 +1,7 @@
 package build
 
 import (
+	"bytes"
 	"maps"
 	"strings"
 )
@@ -160,17 +161,18 @@ func Send(ctx context.Context, req SendMessageRequest) error {
 	return nil
 }
 
-// SendMessage sends structured messages through Core's trusted FrostAgent proxy.
+// SendMessage sends structured messages to the specified session through Core's trusted FrostAgent proxy.
+// Destination routing is strictly governed by the session parameter and does not inherit ambient event targets.
 func SendMessage(ctx context.Context, session string, messages []MessageItem) error {
-	c := GetContext()
-	platform := c.Platform
-	var msgType, targetID string
-	if c.GroupID != "" {
-		msgType = "group"
-		targetID = c.GroupID
-	} else if c.UserID != "" {
-		msgType = "private"
-		targetID = c.UserID
+	var platform, msgType, targetID string
+	session = strings.TrimSpace(session)
+	if session != "" {
+		parts := strings.Split(session, ":")
+		if len(parts) >= 3 {
+			platform = strings.TrimSpace(parts[0])
+			msgType = strings.TrimSpace(parts[1])
+			targetID = strings.TrimSpace(strings.Join(parts[2:], ":"))
+		}
 	}
 
 	return Send(ctx, SendMessageRequest{
@@ -211,6 +213,102 @@ func Reply(ctx context.Context, text string) error {
 }
 `
 
+// CanonicalizeGoModSDK ensures that the staged go.mod for a build sandbox enforces
+// the canonical replace actionscat => ./_sdk directive, removing any conflicting existing
+// replace directives for actionscat (single-line or inside replace (...) blocks) while
+// preserving other dependencies and user directives.
+func CanonicalizeGoModSDK(modBytes []byte) []byte {
+	content := string(modBytes)
+	lines := strings.Split(content, "\n")
+	var newLines []string
+
+	inReplaceBlock := false
+	var replaceBlockLines []string
+	hasRequireActionscat := false
+	inRequireBlock := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Check for require actionscat
+		if strings.HasPrefix(trimmed, "require (") {
+			inRequireBlock = true
+			newLines = append(newLines, line)
+			continue
+		}
+		if inRequireBlock {
+			if trimmed == ")" {
+				inRequireBlock = false
+			} else {
+				fields := strings.Fields(trimmed)
+				if len(fields) > 0 && fields[0] == "actionscat" {
+					hasRequireActionscat = true
+				}
+			}
+			newLines = append(newLines, line)
+			continue
+		}
+		if strings.HasPrefix(trimmed, "require ") {
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 2 && fields[1] == "actionscat" {
+				hasRequireActionscat = true
+			}
+			newLines = append(newLines, line)
+			continue
+		}
+
+		// Handle replace blocks
+		if strings.HasPrefix(trimmed, "replace (") {
+			inReplaceBlock = true
+			replaceBlockLines = nil
+			continue
+		}
+
+		if inReplaceBlock {
+			if trimmed == ")" {
+				inReplaceBlock = false
+				if len(replaceBlockLines) > 0 {
+					newLines = append(newLines, "replace (")
+					newLines = append(newLines, replaceBlockLines...)
+					newLines = append(newLines, ")")
+				}
+			} else {
+				fields := strings.Fields(trimmed)
+				if len(fields) > 0 && fields[0] == "actionscat" {
+					// Drop existing replace actionscat
+					continue
+				}
+				if trimmed != "" {
+					replaceBlockLines = append(replaceBlockLines, line)
+				}
+			}
+			continue
+		}
+
+		// Handle single line replace
+		if strings.HasPrefix(trimmed, "replace ") {
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 2 && fields[1] == "actionscat" {
+				// Drop existing replace actionscat
+				continue
+			}
+		}
+
+		newLines = append(newLines, line)
+	}
+
+	for len(newLines) > 0 && strings.TrimSpace(newLines[len(newLines)-1]) == "" {
+		newLines = newLines[:len(newLines)-1]
+	}
+
+	if !hasRequireActionscat {
+		newLines = append(newLines, "", "require actionscat v0.0.0")
+	}
+
+	newLines = append(newLines, "", "replace actionscat => ./_sdk", "")
+	return []byte(strings.Join(newLines, "\n"))
+}
+
 // InjectSDK ensures that every Action source bundle uploaded to a Go builder container
 // has access to the official ActionsCat SDK without relying on external network or GOPROXY.
 func InjectSDK(sourceFiles map[string][]byte) map[string][]byte {
@@ -225,16 +323,9 @@ func InjectSDK(sourceFiles map[string][]byte) map[string][]byte {
 		result["_sdk/pkg/actionscat/sdk.go"] = []byte(EmbeddedSDKSource)
 	}
 
-	// 2. Manage top-level go.mod
-	if modBytes, hasMod := result["go.mod"]; hasMod {
-		modContent := string(modBytes)
-		if !strings.Contains(modContent, "replace actionscat") {
-			if !strings.HasSuffix(modContent, "\n") {
-				modContent += "\n"
-			}
-			modContent += "\nreplace actionscat => ./_sdk\n"
-			result["go.mod"] = []byte(modContent)
-		}
+	// 2. Manage top-level go.mod with canonical SDK replacement
+	if modBytes, hasMod := result["go.mod"]; hasMod && len(bytes.TrimSpace(modBytes)) > 0 {
+		result["go.mod"] = CanonicalizeGoModSDK(modBytes)
 	} else {
 		defaultMod := "module action\n\ngo 1.25.3\n\nrequire actionscat v0.0.0\n\nreplace actionscat => ./_sdk\n"
 		result["go.mod"] = []byte(defaultMod)

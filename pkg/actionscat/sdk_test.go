@@ -102,6 +102,31 @@ func TestSDK_WriteStateAndSendMessage(t *testing.T) {
 	if receivedSendReq["message_type"] != "private" || receivedSendReq["target_id"] != "usr_202" {
 		t.Errorf("expected private target 'usr_202', got %+v", receivedSendReq)
 	}
+
+	// 4. SendMessage destination routing must NOT be contaminated by ambient event context!
+	// Re-arm ambient group event context
+	t.Setenv("ACTIONSCAT_EVENT_GROUP_ID", "ambient_grp_999")
+	t.Setenv("ACTIONSCAT_EVENT_USER_ID", "ambient_usr_888")
+	t.Setenv("ACTIONSCAT_EVENT_SESSION_ID", "ambient_grp_999:ambient_usr_888")
+
+	err = SendMessage(ctx, "qq:private:target_user_123", []MessageItem{
+		{Type: "plain", Text: "strictly private destination message"},
+	})
+	if err != nil {
+		t.Fatalf("send message failed: %v", err)
+	}
+	if receivedSendReq["session"] != "qq:private:target_user_123" {
+		t.Errorf("session mismatch: %+v", receivedSendReq["session"])
+	}
+	if receivedSendReq["platform"] != "qq" {
+		t.Errorf("expected platform 'qq', got %+v", receivedSendReq["platform"])
+	}
+	if receivedSendReq["message_type"] != "private" {
+		t.Errorf("expected message_type 'private' (not contaminated by ambient group), got %+v", receivedSendReq["message_type"])
+	}
+	if receivedSendReq["target_id"] != "target_user_123" {
+		t.Errorf("expected target_id 'target_user_123' (not contaminated by ambient group), got %+v", receivedSendReq["target_id"])
+	}
 }
 
 func TestSDK_ErrorsWhenNotConfigured(t *testing.T) {

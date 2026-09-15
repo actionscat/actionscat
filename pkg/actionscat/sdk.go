@@ -152,17 +152,18 @@ func Send(ctx context.Context, req SendMessageRequest) error {
 	return nil
 }
 
-// SendMessage sends structured messages through Core's trusted FrostAgent proxy.
+// SendMessage sends structured messages to the specified session through Core's trusted FrostAgent proxy.
+// Destination routing is strictly governed by the session parameter and does not inherit ambient event targets.
 func SendMessage(ctx context.Context, session string, messages []MessageItem) error {
-	c := GetContext()
-	platform := c.Platform
-	var msgType, targetID string
-	if c.GroupID != "" {
-		msgType = "group"
-		targetID = c.GroupID
-	} else if c.UserID != "" {
-		msgType = "private"
-		targetID = c.UserID
+	var platform, msgType, targetID string
+	session = strings.TrimSpace(session)
+	if session != "" {
+		parts := strings.Split(session, ":")
+		if len(parts) >= 3 {
+			platform = strings.TrimSpace(parts[0])
+			msgType = strings.TrimSpace(parts[1])
+			targetID = strings.TrimSpace(strings.Join(parts[2:], ":"))
+		}
 	}
 
 	return Send(ctx, SendMessageRequest{

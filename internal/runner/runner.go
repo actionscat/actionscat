@@ -336,15 +336,23 @@ func (r *Runner) executeRun(ctx context.Context, run *domain.Run) {
 	// Determine advertised runtime endpoint for the sandbox callback topology
 	r.mu.Lock()
 	effectiveEndpoint := r.advertisedRuntimeEndpoint
+	advertisedSet := r.advertisedRuntimeEndpoint != ""
 	if effectiveEndpoint == "" {
 		effectiveEndpoint = r.runtimeEndpoint
 	}
 	r.mu.Unlock()
 
-	// Check for container network topology issues
-	if strings.Contains(effectiveEndpoint, "127.0.0.1") || strings.Contains(effectiveEndpoint, "localhost") {
-		if len(ver.RuntimeCapabilities) > 0 {
-			log.Printf("[runner] WARNING: Run %s action has runtime capabilities %v but runtime endpoint is loopback (%s); container workers cannot reach ActionsCat host unless ACTIONSCAT_RUNTIME_ADVERTISED_ENDPOINT is set", run.ID, ver.RuntimeCapabilities, effectiveEndpoint)
+	// Check for container network topology issues and fail-fast when runtime capabilities cannot be reached
+	if len(ver.RuntimeCapabilities) > 0 {
+		if strings.TrimSpace(effectiveEndpoint) == "" {
+			r.finishRun(ctx, run.ID, domain.RunStatusFailed, nil, "", "action requires runtime capabilities but no runtime endpoint is configured", startTime)
+			return
+		}
+		if !advertisedSet && (strings.Contains(effectiveEndpoint, "127.0.0.1") || strings.Contains(effectiveEndpoint, "localhost")) {
+			errMsg := fmt.Sprintf("action requires runtime capabilities %v but effective runtime endpoint is loopback (%s); configure ACTIONSCAT_RUNTIME_ADVERTISED_ENDPOINT for container callback", ver.RuntimeCapabilities, effectiveEndpoint)
+			log.Printf("[runner] ERROR: Run %s: %s", run.ID, errMsg)
+			r.finishRun(ctx, run.ID, domain.RunStatusFailed, nil, "", errMsg, startTime)
+			return
 		}
 	}
 
