@@ -59,9 +59,10 @@ func ValidateSessionRequest(req SessionRequest) error {
 
 // SessionHandle identifies an active sandbox session.
 type SessionHandle struct {
-	SessionID string
-	UserUUID  string
-	Profile   string
+	SessionID          string
+	UserUUID           string
+	Profile            string
+	RuntimeCallbackURL string
 }
 
 // ExecRequest specifies the execution parameters for a command inside the sandbox.

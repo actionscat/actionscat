@@ -310,6 +310,128 @@ func TestClient_CreateSession_ContractFailClosed(t *testing.T) {
 	if !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("expected ErrInvalidRequest for empty allowlist, got: %v", err)
 	}
+	// 7. Effective Runtime Callback URL from Gateway response is recorded in SessionHandle
+	returnStatus = http.StatusCreated
+	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/status":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/api/v1/sessions":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{
+				"user_uuid": "mock-uuid-effective",
+				"profile": "action-runtime",
+				"network": "isolated",
+				"status": "ready",
+				"runtime_callback_url": "http://172.28.0.2:3874/api/v1/sessions/mock-uuid-effective/callback"
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	handleProxy, err := client.CreateSession(ctx, SessionRequest{
+		SessionID:          "sess_proxy_effective",
+		Profile:            ProfileRuntime,
+		Network:            domain.NetworkPolicy{Mode: domain.NetworkModeIsolated},
+		RuntimeCallbackURL: "http://host.docker.internal:7999/api/v1/runtime",
+		Env: map[string]string{
+			"ACTIONSCAT_RUNTIME_ENDPOINT": "http://host.docker.internal:7999/api/v1/runtime",
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected successful CreateSession with proxy, got: %v", err)
+	}
+	if handleProxy.RuntimeCallbackURL != "http://172.28.0.2:3874/api/v1/sessions/mock-uuid-effective/callback" {
+		t.Fatalf("expected effective proxy URL in handle, got %s", handleProxy.RuntimeCallbackURL)
+	}
+}
+
+func TestClient_ExecEnvIsolation_DoesNotClobberContainerEnv(t *testing.T) {
+	ctx := context.Background()
+	var executedCmd string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/status":
+			w.WriteHeader(http.StatusOK)
+		case "/api/v1/sessions":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{
+				"user_uuid": "user-exec-test",
+				"profile": "action-runtime",
+				"network": "isolated",
+				"runtime_callback_url": "http://172.28.0.2:3874/api/v1/sessions/user-exec-test/callback"
+			}`))
+		case "/api/v1/shell/exec":
+			var req gatewayExecRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			executedCmd = req.Command
+			exitCode := 0
+			resp := gatewayExecResponse{ExitCode: &exitCode}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		BaseURL:          server.URL,
+		AuthToken:        "tok",
+		SessionNamespace: "test",
+	})
+
+	// 1. Create session with session-level environment (e.g. initial advertised endpoint)
+	_, err := client.CreateSession(ctx, SessionRequest{
+		SessionID: "sess_exec_isolation",
+		Profile:   ProfileRuntime,
+		Network:   domain.NetworkPolicy{Mode: domain.NetworkModeIsolated},
+		Env: map[string]string{
+			"ACTIONSCAT_RUNTIME_ENDPOINT": "http://stale-host-advertised:7999/api/v1/runtime",
+			"SESSION_VAR":                 "initial_val",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// 2. Exec without per-exec overrides: MUST NOT re-inject session env into command
+	_, err = client.Exec(ctx, ExecRequest{
+		SessionID: "sess_exec_isolation",
+		Command:   "/sandbox/entrypoint",
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if containsStr(executedCmd, "ACTIONSCAT_RUNTIME_ENDPOINT") || containsStr(executedCmd, "SESSION_VAR") {
+		t.Fatalf("Exec must not re-inject session env into command, got: %s", executedCmd)
+	}
+	if executedCmd != "/sandbox/entrypoint" {
+		t.Fatalf("expected plain command without prepended exports, got: %s", executedCmd)
+	}
+
+	// 3. Exec with explicit per-exec overrides: ONLY per-exec overrides are prepended
+	_, err = client.Exec(ctx, ExecRequest{
+		SessionID: "sess_exec_isolation",
+		Command:   "/sandbox/entrypoint",
+		Env: map[string]string{
+			"PER_EXEC_FLAG": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !containsStr(executedCmd, "export PER_EXEC_FLAG='1';") {
+		t.Fatalf("expected per-exec override exported in command, got: %s", executedCmd)
+	}
+	if containsStr(executedCmd, "SESSION_VAR") {
+		t.Fatalf("session env must still not be injected, got: %s", executedCmd)
+	}
 }
 
 func containsStr(s, sub string) bool {

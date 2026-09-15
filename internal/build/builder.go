@@ -123,7 +123,7 @@ func (b *Builder) BuildVersion(ctx context.Context, actionID, versionID string) 
 	// 6. Execute Build Spec Command
 	// Ensure /sandbox/out exists; canonical artifact target is /sandbox/out/entrypoint
 	cmd := fmt.Sprintf("mkdir -p /sandbox/out && cd /sandbox && %s", ver.BuildSpec.Command)
-	buildTimeout := 5 * time.Minute
+	buildTimeout := 120 * time.Second
 
 	execRes, err := b.sandbox.Exec(ctx, sandbox.ExecRequest{
 		SessionID: sessionID,
@@ -135,6 +135,9 @@ func (b *Builder) BuildVersion(ctx context.Context, actionID, versionID string) 
 	completedAt := time.Now().UTC()
 	buildRecord.Stdout = execRes.Stdout
 	buildRecord.Stderr = execRes.Stderr
+	if err != nil && buildRecord.Stderr == "" {
+		buildRecord.Stderr = err.Error()
+	}
 	buildRecord.ExitCode = execRes.ExitCode
 	buildRecord.CompletedAt = &completedAt
 

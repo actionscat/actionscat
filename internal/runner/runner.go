@@ -363,7 +363,7 @@ func (r *Runner) executeRun(ctx context.Context, run *domain.Run) {
 	sandboxEnv["ACTIONSCAT_RUNTIME_ENDPOINT"] = effectiveEndpoint
 	sandboxEnv["ACTIONSCAT_RUNTIME_TOKEN"] = rawToken
 
-	_, err = r.sandbox.CreateSession(ctx, sandbox.SessionRequest{
+	sessHandle, err := r.sandbox.CreateSession(ctx, sandbox.SessionRequest{
 		SessionID:          sessionID,
 		Profile:            sandbox.ProfileRuntime,
 		Network:            ver.RuntimeSpec.Network,
@@ -375,6 +375,9 @@ func (r *Runner) executeRun(ctx context.Context, run *domain.Run) {
 	if err != nil {
 		r.finishRun(ctx, run.ID, domain.RunStatusFailed, nil, "", "sandbox provision failed: "+err.Error(), startTime)
 		return
+	}
+	if sessHandle != nil && sessHandle.RuntimeCallbackURL != "" {
+		sandboxEnv["ACTIONSCAT_RUNTIME_ENDPOINT"] = sessHandle.RuntimeCallbackURL
 	}
 
 	// 4. Read Artifact Bundle from FileStore and upload into Sandbox
@@ -401,7 +404,6 @@ func (r *Runner) executeRun(ctx context.Context, run *domain.Run) {
 		Command:   cmd,
 		Cwd:       "/sandbox",
 		Timeout:   runTimeout,
-		Env:       sandboxEnv,
 	})
 
 	if err != nil {
@@ -437,6 +439,9 @@ func (r *Runner) finishRun(
 ) {
 	completedAt := time.Now().UTC()
 	durationMs := completedAt.Sub(startTime).Milliseconds()
+
+	// Revoke capability tokens immediately upon finalizing run status
+	_ = r.store.RevokeTokensForRun(ctx, runID, completedAt)
 
 	_ = r.store.UpdateRunStatus(
 		ctx, runID, status, exitCode, stdout, stderr, durationMs, stderr, &completedAt,

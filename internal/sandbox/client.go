@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -160,9 +159,22 @@ func (c *Client) CreateSession(ctx context.Context, req SessionRequest) (*Sessio
 	}
 	defer resp.Body.Close()
 
+	type gatewaySessionInitResponse struct {
+		UserUUID           string   `json:"user_uuid"`
+		Profile            string   `json:"profile"`
+		Network            string   `json:"network"`
+		Status             string   `json:"status"`
+		AllowedHosts       []string `json:"allowed_hosts"`
+		RuntimeCallbackURL string   `json:"runtime_callback_url"`
+	}
+
+	var initResp gatewaySessionInitResponse
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated, http.StatusNoContent:
 		// Gateway successfully provisioned and bound the session contract
+		if resp.Body != nil {
+			_ = json.NewDecoder(resp.Body).Decode(&initResp)
+		}
 	case http.StatusNotFound:
 		// Gateway does not support the explicit session/profile contract -> Fail Closed!
 		return nil, fmt.Errorf("%w: gateway returned 404 on /api/v1/sessions", ErrProfileNotSupported)
@@ -174,15 +186,27 @@ func (c *Client) CreateSession(ctx context.Context, req SessionRequest) (*Sessio
 		return nil, fmt.Errorf("%w: gateway returned HTTP %d on session init: %s", ErrSandboxUnavailable, resp.StatusCode, string(body))
 	}
 
+	effectiveCallbackURL := req.RuntimeCallbackURL
+	if initResp.RuntimeCallbackURL != "" {
+		effectiveCallbackURL = initResp.RuntimeCallbackURL
+	}
+
+	storedReq := req
+	storedReq.RuntimeCallbackURL = effectiveCallbackURL
+	if storedReq.Env != nil && effectiveCallbackURL != "" {
+		storedReq.Env["ACTIONSCAT_RUNTIME_ENDPOINT"] = effectiveCallbackURL
+	}
+
 	// Store verified session policy and settings locally
 	c.mu.Lock()
-	c.sessions[req.SessionID] = req
+	c.sessions[req.SessionID] = storedReq
 	c.mu.Unlock()
 
 	return &SessionHandle{
-		SessionID: req.SessionID,
-		UserUUID:  userUUID,
-		Profile:   req.Profile,
+		SessionID:          req.SessionID,
+		UserUUID:           userUUID,
+		Profile:            req.Profile,
+		RuntimeCallbackURL: effectiveCallbackURL,
 	}, nil
 }
 
@@ -215,12 +239,11 @@ func (c *Client) Exec(ctx context.Context, req ExecRequest) (ExecResult, error) 
 	q := execURL.Query()
 	q.Set("user_uuid", userUUID)
 
-	// Propagate profile, network, and resource policy if configured for this session
+	// Propagate profile and network policy if configured for this session
 	c.mu.RLock()
 	sessReq, hasSess := c.sessions[req.SessionID]
 	c.mu.RUnlock()
 
-	mergedEnv := make(map[string]string)
 	if hasSess {
 		if sessReq.Profile != "" {
 			q.Set("profile", sessReq.Profile)
@@ -228,15 +251,15 @@ func (c *Client) Exec(ctx context.Context, req ExecRequest) (ExecResult, error) 
 		if sessReq.Network.Mode != "" {
 			q.Set("network", sessReq.Network.Mode)
 		}
-		maps.Copy(mergedEnv, sessReq.Env)
 	}
-	maps.Copy(mergedEnv, req.Env)
 
 	execURL.RawQuery = q.Encode()
 
 	timeoutSec := req.Timeout.Seconds()
 	if timeoutSec <= 0 {
 		timeoutSec = 60.0
+	} else if timeoutSec > 120.0 {
+		timeoutSec = 120.0
 	}
 
 	cwd := req.Cwd
@@ -244,11 +267,14 @@ func (c *Client) Exec(ctx context.Context, req ExecRequest) (ExecResult, error) 
 		cwd = "/sandbox"
 	}
 
-	// If environment variables are provided, prepend them securely to command execution
+	// The session provisioning effective environment is the single source of truth.
+	// Container environment was already configured during session initialization.
+	// Avoid re-injecting stale session environment (which could clobber the container's
+	// proxy URL with host advertised endpoints). Only apply explicit per-exec overrides if provided.
 	fullCmd := req.Command
-	if len(mergedEnv) > 0 {
+	if len(req.Env) > 0 {
 		var envBuilder strings.Builder
-		for k, v := range mergedEnv {
+		for k, v := range req.Env {
 			// export key='escaped_val'
 			escapedVal := strings.ReplaceAll(v, "'", `'\''`)
 			fmt.Fprintf(&envBuilder, "export %s='%s'; ", k, escapedVal)
@@ -299,68 +325,141 @@ func (c *Client) Exec(ctx context.Context, req ExecRequest) (ExecResult, error) 
 	}, nil
 }
 
-// UploadFiles streams files into the sandbox worker filesystem using base64 shell unpacking.
+// UploadFiles streams files into the sandbox worker filesystem using base64 shell unpacking with chunking.
 func (c *Client) UploadFiles(ctx context.Context, sessionID string, files map[string][]byte) error {
 	if len(files) == 0 {
 		return nil
 	}
 
-	// Batch file unpacking using shell exec to ensure reliable file transmission without external S3
-	var script strings.Builder
+	const chunkSize = 30000 // 30KB is a multiple of 3, producing ~40KB base64 (< 64KB command limit)
+
 	for relPath, data := range files {
-		encoded := base64.StdEncoding.EncodeToString(data)
 		cleanRel := strings.TrimPrefix(relPath, "/")
 		cleanRel = strings.TrimPrefix(cleanRel, "sandbox/")
 		targetPath := "/sandbox/" + cleanRel
-		targetDir := targetPath[:strings.LastIndex(targetPath, "/")]
+		lastSlash := strings.LastIndex(targetPath, "/")
+		targetDir := "/sandbox"
+		if lastSlash > 0 {
+			targetDir = targetPath[:lastSlash]
+		}
 
-		fmt.Fprintf(&script, "mkdir -p %q && base64 -d <<'EOF' > %q\n%s\nEOF\n", targetDir, targetPath, encoded)
-	}
+		// Ensure target directory exists
+		mkdirRes, err := c.Exec(ctx, ExecRequest{
+			SessionID: sessionID,
+			Command:   fmt.Sprintf("mkdir -p %q", targetDir),
+			Cwd:       "/sandbox",
+			Timeout:   15 * time.Second,
+		})
+		if err != nil {
+			return fmt.Errorf("mkdir for %q failed: %w", targetDir, err)
+		}
+		if mkdirRes.ExitCode == nil || *mkdirRes.ExitCode != 0 {
+			return fmt.Errorf("mkdir for %q failed: %s", targetDir, mkdirRes.Stderr)
+		}
 
-	res, err := c.Exec(ctx, ExecRequest{
-		SessionID: sessionID,
-		Command:   script.String(),
-		Cwd:       "/sandbox",
-		Timeout:   30 * time.Second,
-	})
-	if err != nil {
-		return fmt.Errorf("upload files failed: %w", err)
-	}
-	if res.ExitCode == nil || *res.ExitCode != 0 {
-		return fmt.Errorf("upload files failed with exit code %v: %s", res.ExitCode, res.Stderr)
+		if len(data) == 0 {
+			_, err := c.Exec(ctx, ExecRequest{
+				SessionID: sessionID,
+				Command:   fmt.Sprintf(": > %q", targetPath),
+				Cwd:       "/sandbox",
+				Timeout:   15 * time.Second,
+			})
+			if err != nil {
+				return fmt.Errorf("touch empty file %q failed: %w", targetPath, err)
+			}
+			continue
+		}
+
+		for offset := 0; offset < len(data); offset += chunkSize {
+			end := min(offset+chunkSize, len(data))
+			chunk := data[offset:end]
+			encoded := base64.StdEncoding.EncodeToString(chunk)
+
+			op := ">"
+			if offset > 0 {
+				op = ">>"
+			}
+			cmd := fmt.Sprintf("base64 -d <<'EOF' %s %q\n%s\nEOF\n", op, targetPath, encoded)
+
+			res, err := c.Exec(ctx, ExecRequest{
+				SessionID: sessionID,
+				Command:   cmd,
+				Cwd:       "/sandbox",
+				Timeout:   30 * time.Second,
+			})
+			if err != nil {
+				return fmt.Errorf("upload chunk for %q failed: %w", targetPath, err)
+			}
+			if res.ExitCode == nil || *res.ExitCode != 0 {
+				return fmt.Errorf("upload chunk for %q failed with exit code %v: %s", targetPath, res.ExitCode, res.Stderr)
+			}
+		}
 	}
 	return nil
 }
 
-// ExportFiles reads files from the sandbox worker filesystem using base64 output.
+// ExportFiles reads files from the sandbox worker filesystem using base64 output with chunking.
 func (c *Client) ExportFiles(ctx context.Context, sessionID string, paths []string) (map[string][]byte, error) {
 	out := make(map[string][]byte)
+	const exportChunkBytes = 524288 // 512 KB per chunk -> ~683 KB base64, safely within 1MB stream drain limit
+
 	for _, p := range paths {
 		cleanRel := strings.TrimPrefix(p, "/")
 		cleanRel = strings.TrimPrefix(cleanRel, "sandbox/")
 
 		// Check /sandbox/<path> as well as root /<path>
-		cmd := fmt.Sprintf("base64 -w 0 %q 2>/dev/null || base64 -w 0 %q 2>/dev/null || true",
-			"/sandbox/"+cleanRel, "/"+cleanRel)
-
-		res, err := c.Exec(ctx, ExecRequest{
+		findCmd := fmt.Sprintf(
+			"if [ -f \"/sandbox/%s\" ]; then echo \"/sandbox/%s\"; elif [ -f \"/%s\" ]; then echo \"/%s\"; fi",
+			cleanRel, cleanRel, cleanRel, cleanRel,
+		)
+		findRes, err := c.Exec(ctx, ExecRequest{
 			SessionID: sessionID,
-			Command:   cmd,
+			Command:   findCmd,
 			Cwd:       "/sandbox",
-			Timeout:   30 * time.Second,
+			Timeout:   15 * time.Second,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("export file %q failed: %w", p, err)
+			return nil, fmt.Errorf("locate file %q failed: %w", p, err)
 		}
-		rawB64 := strings.TrimSpace(res.Stdout)
-		if rawB64 == "" {
+		targetFile := strings.TrimSpace(findRes.Stdout)
+		if targetFile == "" {
 			continue
 		}
-		data, err := base64.StdEncoding.DecodeString(rawB64)
-		if err != nil {
-			return nil, fmt.Errorf("decode exported file %q: %w", p, err)
+
+		// Read in 512KB chunks using dd to prevent stdout truncation at 1MiB
+		var fileBuf bytes.Buffer
+		skip := 0
+		for {
+			cmd := fmt.Sprintf("dd if=%q bs=%d skip=%d count=1 2>/dev/null | base64 -w 0",
+				targetFile, exportChunkBytes, skip)
+
+			res, err := c.Exec(ctx, ExecRequest{
+				SessionID: sessionID,
+				Command:   cmd,
+				Cwd:       "/sandbox",
+				Timeout:   30 * time.Second,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("export chunk for %q failed: %w", p, err)
+			}
+			rawB64 := strings.TrimSpace(res.Stdout)
+			if rawB64 == "" {
+				break
+			}
+			chunk, err := base64.StdEncoding.DecodeString(rawB64)
+			if err != nil {
+				return nil, fmt.Errorf("decode chunk for %q: %w", p, err)
+			}
+			if len(chunk) == 0 {
+				break
+			}
+			fileBuf.Write(chunk)
+			if len(chunk) < exportChunkBytes {
+				break
+			}
+			skip++
 		}
-		out[p] = data
+		out[p] = fileBuf.Bytes()
 	}
 	return out, nil
 }

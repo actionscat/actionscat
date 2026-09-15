@@ -161,12 +161,12 @@ func TestRunner_ExecuteRun_EndToEndAndTokenRevocation(t *testing.T) {
 
 	// Mock sandbox exec behavior
 	zero := 0
-	sb.CustomExec = func(req sandbox.ExecRequest, _ *sandbox.FakeSession) (sandbox.ExecResult, error) {
-		// Verify environment variables were passed to sandbox
-		if req.Env["ACTIONSCAT_ACTION_ID"] != act.ID {
+	sb.CustomExec = func(req sandbox.ExecRequest, sess *sandbox.FakeSession) (sandbox.ExecResult, error) {
+		// Verify environment variables were provisioned to sandbox session
+		if sess.Req.Env["ACTIONSCAT_ACTION_ID"] != act.ID {
 			t.Errorf("missing ACTIONSCAT_ACTION_ID")
 		}
-		if req.Env["ACTIONSCAT_RUNTIME_TOKEN"] == "" {
+		if sess.Req.Env["ACTIONSCAT_RUNTIME_TOKEN"] == "" {
 			t.Errorf("missing ACTIONSCAT_RUNTIME_TOKEN")
 		}
 		return sandbox.ExecResult{
