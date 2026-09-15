@@ -1,0 +1,30 @@
+{
+  "name": "maimai_recorder",
+  "description": "Deterministic Maimai check-in / check-out attendance tracker using ActionsCat persistent state",
+  "build_spec": {
+    "language": "go",
+    "toolchain_requirement": ">= 1.25",
+    "command": "go build -o /sandbox/out/entrypoint .",
+    "network": false
+  },
+  "runtime_spec": {
+    "entrypoint": "entrypoint",
+    "timeout_seconds": 15,
+    "memory_limit_mb": 64,
+    "cpu_limit": 0.5,
+    "network": {
+      "mode": "none"
+    }
+  },
+  "state_injections": [
+    {
+      "state_path": "attendance.json",
+      "env_var": "INJECTED_ATTENDANCE",
+      "optional": true
+    }
+  ],
+  "runtime_capabilities": [
+    "state.write",
+    "frostagent.sendmsg"
+  ]
+}
