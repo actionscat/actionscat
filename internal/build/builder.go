@@ -157,7 +157,18 @@ func (b *Builder) BuildVersion(ctx context.Context, actionID, versionID string) 
 
 	// 7. Export built artifact files from /sandbox/out or /sandbox
 	exported, err := b.sandbox.ExportFiles(ctx, sessionID, []string{"/sandbox/out/entrypoint", "out/entrypoint", "entrypoint"})
-	if err != nil || len(exported) == 0 {
+	if err != nil {
+		status := domain.BuildStatusFailed
+		buildRecord.Status = status
+		buildRecord.Stderr += fmt.Sprintf("\nfailed to export artifact: %v", err)
+		_ = b.store.UpdateBuildResult(
+			ctx, buildID, status, toolchainVersion,
+			execRes.Stdout, buildRecord.Stderr, execRes.ExitCode,
+			"", "", 0, completedAt,
+		)
+		return buildRecord, fmt.Errorf("failed to export artifact: %w", err)
+	}
+	if len(exported) == 0 {
 		status := domain.BuildStatusFailed
 		buildRecord.Status = status
 		errMsg := "build finished but no entrypoint artifact was generated"

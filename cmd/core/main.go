@@ -109,7 +109,9 @@ func main() {
 	defer cancel()
 
 	// Start asynchronous persistent workers
-	server.Runner.Start(ctx)
+	if err := server.Runner.Start(ctx); err != nil {
+		log.Fatalf("failed to start runner: %v", err)
+	}
 	server.Scheduler.Start(ctx)
 
 	router := server.SetupRouter()

@@ -367,3 +367,65 @@ func main() {
 	})
 }
 
+func TestBuildLifecycle_ArtifactTooLarge_FailsCleanly(t *testing.T) {
+	ctx := context.Background()
+	st, _, sb, actSvc, builder := setupTestEnvironment(t)
+
+	act, err := actSvc.CreateAction(ctx, action.CreateActionRequest{
+		Name: "Large Artifact Action",
+	})
+	if err != nil {
+		t.Fatalf("create action: %v", err)
+	}
+
+	ver, err := actSvc.CreateVersion(ctx, act.ID, action.CreateVersionRequest{
+		Files: map[string][]byte{
+			"main.go": []byte("package main\nfunc main() {}\n"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create version: %v", err)
+	}
+
+	// CustomExec writes a 65MB binary to simulate oversized artifact output
+	sb.CustomExec = func(req sandbox.ExecRequest, session *sandbox.FakeSession) (sandbox.ExecResult, error) {
+		zero := 0
+		if strings.Contains(req.Command, "go version") {
+			return sandbox.ExecResult{
+				Stdout:   "go version go1.27.3 linux/amd64\n",
+				ExitCode: &zero,
+			}, nil
+		}
+		if strings.Contains(req.Command, "go build") {
+			// Allocate 65MB
+			session.Files["entrypoint"] = make([]byte, 65*1024*1024)
+			return sandbox.ExecResult{
+				Stdout:   "build succeeded\n",
+				ExitCode: &zero,
+			}, nil
+		}
+		return sandbox.ExecResult{ExitCode: &zero}, nil
+	}
+
+	buildRecord, err := builder.BuildVersion(ctx, act.ID, ver.ID)
+	if err == nil {
+		t.Fatal("expected BuildVersion to fail on oversized artifact, got nil")
+	}
+
+	if buildRecord.Status != domain.BuildStatusFailed {
+		t.Fatalf("expected build status failed, got %s", buildRecord.Status)
+	}
+
+	// Verify build in SQLite database is marked as failed
+	dbBuild, err := st.GetBuild(ctx, buildRecord.ID)
+	if err != nil {
+		t.Fatalf("failed to retrieve build from db: %v", err)
+	}
+	if dbBuild.Status != domain.BuildStatusFailed {
+		t.Fatalf("expected db build status failed, got %s", dbBuild.Status)
+	}
+	if !strings.Contains(dbBuild.Stderr, "exceeds limit") {
+		t.Fatalf("expected stderr to contain error detail, got: %s", dbBuild.Stderr)
+	}
+}
+

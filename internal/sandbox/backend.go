@@ -14,12 +14,16 @@ var (
 	ErrExecutionFailed     = errors.New("sandbox execution failed")
 	ErrInvalidRequest      = errors.New("invalid sandbox request")
 	ErrProfileNotSupported = errors.New("sandbox backend does not support requested profile/session contract")
+	ErrArtifactTooLarge    = errors.New("artifact size exceeds maximum limit (64MB)")
 )
 
 const (
 	ProfileGoBuilder = "go-builder"
 	ProfileRuntime   = "action-runtime"
 	ProfileMinimal   = "minimal"
+
+	// MaxArtifactTotalBytes defines the maximum allowed total size when exporting artifacts from a sandbox (64 MB).
+	MaxArtifactTotalBytes = 64 * 1024 * 1024
 )
 
 // SessionRequest defines parameters to provision or configure an isolated sandbox session.

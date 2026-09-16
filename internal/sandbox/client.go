@@ -170,10 +170,10 @@ func (c *Client) CreateSession(ctx context.Context, req SessionRequest) (*Sessio
 
 	var initResp gatewaySessionInitResponse
 	switch resp.StatusCode {
-	case http.StatusOK, http.StatusCreated, http.StatusNoContent:
+	case http.StatusOK, http.StatusCreated:
 		// Gateway successfully provisioned and bound the session contract
-		if resp.Body != nil {
-			_ = json.NewDecoder(resp.Body).Decode(&initResp)
+		if err := json.NewDecoder(resp.Body).Decode(&initResp); err != nil {
+			return nil, fmt.Errorf("%w: failed to decode gateway session init response: %v", ErrSandboxUnavailable, err)
 		}
 	case http.StatusNotFound:
 		// Gateway does not support the explicit session/profile contract -> Fail Closed!
@@ -184,6 +184,31 @@ func (c *Client) CreateSession(ctx context.Context, req SessionRequest) (*Sessio
 	default:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("%w: gateway returned HTTP %d on session init: %s", ErrSandboxUnavailable, resp.StatusCode, string(body))
+	}
+
+	// Contract conformance validation (Fail Closed)
+	if initResp.UserUUID == "" || initResp.UserUUID != userUUID {
+		return nil, fmt.Errorf("%w: gateway user_uuid mismatch (expected %q, got %q)", ErrProfileNotSupported, userUUID, initResp.UserUUID)
+	}
+	if req.Profile != "" && initResp.Profile != req.Profile {
+		return nil, fmt.Errorf("%w: gateway profile mismatch (expected %q, got %q)", ErrProfileNotSupported, req.Profile, initResp.Profile)
+	}
+	if req.Network.Mode != "" && initResp.Network != string(req.Network.Mode) {
+		return nil, fmt.Errorf("%w: gateway network mismatch (expected %q, got %q)", ErrProfileNotSupported, req.Network.Mode, initResp.Network)
+	}
+	if req.Network.Mode == domain.NetworkModeAllowlist {
+		returnedHosts := make(map[string]bool, len(initResp.AllowedHosts))
+		for _, h := range initResp.AllowedHosts {
+			returnedHosts[h] = true
+		}
+		for _, h := range allowedHosts {
+			if !returnedHosts[h] {
+				return nil, fmt.Errorf("%w: gateway missing requested allowed host %q", ErrProfileNotSupported, h)
+			}
+		}
+	}
+	if initResp.Status != "ready" && initResp.Status != "created" {
+		return nil, fmt.Errorf("%w: gateway session status not ready (%q)", ErrSandboxUnavailable, initResp.Status)
 	}
 
 	effectiveCallbackURL := req.RuntimeCallbackURL
@@ -402,6 +427,7 @@ func (c *Client) UploadFiles(ctx context.Context, sessionID string, files map[st
 func (c *Client) ExportFiles(ctx context.Context, sessionID string, paths []string) (map[string][]byte, error) {
 	out := make(map[string][]byte)
 	const exportChunkBytes = 524288 // 512 KB per chunk -> ~683 KB base64, safely within 1MB stream drain limit
+	var totalExportedBytes int64
 
 	for _, p := range paths {
 		cleanRel := strings.TrimPrefix(p, "/")
@@ -452,6 +478,10 @@ func (c *Client) ExportFiles(ctx context.Context, sessionID string, paths []stri
 			}
 			if len(chunk) == 0 {
 				break
+			}
+			totalExportedBytes += int64(len(chunk))
+			if totalExportedBytes > MaxArtifactTotalBytes {
+				return nil, fmt.Errorf("%w: total artifact size exceeded %d bytes while exporting %q", ErrArtifactTooLarge, MaxArtifactTotalBytes, p)
 			}
 			fileBuf.Write(chunk)
 			if len(chunk) < exportChunkBytes {

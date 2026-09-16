@@ -163,6 +163,14 @@ func (f *FakeBackend) ExportFiles(ctx context.Context, sessionID string, paths [
 	if len(paths) == 0 {
 		maps.Copy(out, sess.Files)
 	}
+
+	var totalSize int64
+	for _, data := range out {
+		totalSize += int64(len(data))
+	}
+	if totalSize > MaxArtifactTotalBytes {
+		return nil, fmt.Errorf("%w: total artifact size %d exceeds limit of %d bytes", ErrArtifactTooLarge, totalSize, MaxArtifactTotalBytes)
+	}
 	return out, nil
 }
 

@@ -177,7 +177,9 @@ func TestRunner_ExecuteRun_EndToEndAndTokenRevocation(t *testing.T) {
 	}
 
 	// Start runner workers
-	r.Start(ctx)
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("start runner: %v", err)
+	}
 	defer r.Stop()
 
 	run, err := r.CreateRun(ctx, CreateRunRequest{
@@ -240,7 +242,9 @@ func TestRunner_ConcurrencyLimit(t *testing.T) {
 		return sandbox.ExecResult{ExitCode: &zero, Stdout: "done"}, nil
 	}
 
-	r.Start(ctx)
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("start runner: %v", err)
+	}
 	defer r.Stop()
 
 	// Enqueue Run 1 and Run 2
@@ -398,7 +402,9 @@ func TestRunner_FailFast_LoopbackRuntimeCapabilities(t *testing.T) {
 	// Action has runtime capabilities [state.write]
 	act, _, _ := createRunnableAction(t, st, fs, "act_failfast", 1, nil)
 
-	r.Start(ctx)
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("start runner: %v", err)
+	}
 	defer r.Stop()
 
 	run, err := r.CreateRun(ctx, CreateRunRequest{
@@ -428,5 +434,42 @@ func TestRunner_FailFast_LoopbackRuntimeCapabilities(t *testing.T) {
 	}
 	if !strings.Contains(finishedRun.ErrorMessage, "loopback") || !strings.Contains(finishedRun.ErrorMessage, "ACTIONSCAT_RUNTIME_ADVERTISED_ENDPOINT") {
 		t.Fatalf("expected fail-fast loopback error message, got %q", finishedRun.ErrorMessage)
+	}
+}
+
+func TestRunner_Start_OrphanRecoveryFailure_Gating(t *testing.T) {
+	tempDir := t.TempDir()
+	db, err := store.OpenDB(filepath.Join(tempDir, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+
+	st := store.NewSQLiteStore(db)
+	fs := store.NewFileStore(tempDir)
+	ss := store.NewStateStore(tempDir)
+	sb := sandbox.NewFakeBackend()
+
+	r := NewRunner(st, fs, ss, sb, Config{
+		MaxWorkers: 2,
+	})
+
+	// Intentionally close database before Start to force recovery failure
+	_ = db.Close()
+
+	ctx := context.Background()
+	err = r.Start(ctx)
+	if err == nil {
+		t.Fatal("expected r.Start() to fail when database is unavailable, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to recover orphan runs") {
+		t.Fatalf("expected error mentioning orphan recovery, got: %v", err)
+	}
+
+	// Verify that workers were not launched
+	r.mu.Lock()
+	cancelFn := r.cancel
+	r.mu.Unlock()
+	if cancelFn != nil {
+		t.Fatal("worker context should not be initialized if startup recovery failed")
 	}
 }

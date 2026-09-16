@@ -219,11 +219,23 @@ func (r *Runner) RecoverOrphans(ctx context.Context) (int64, error) {
 }
 
 // Start launches the bounded worker pool and queue processor.
-func (r *Runner) Start(ctx context.Context) {
+// Fails closed and returns an error if startup orphan recovery fails after retries.
+func (r *Runner) Start(ctx context.Context) error {
 	// Crash recovery: identify orphan runs left in 'running' state and revoke tokens
-	if n, err := r.store.RecoverOrphanRuns(ctx, time.Now().UTC()); err != nil {
-		log.Printf("[runner] error during orphan run recovery: %v", err)
-	} else if n > 0 {
+	var n int64
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		n, err = r.store.RecoverOrphanRuns(ctx, time.Now().UTC())
+		if err == nil {
+			break
+		}
+		time.Sleep(time.Duration(attempt*20) * time.Millisecond)
+	}
+	if err != nil {
+		log.Printf("[runner] CRITICAL: orphan run recovery failed at startup: %v", err)
+		return fmt.Errorf("failed to recover orphan runs at startup: %w", err)
+	}
+	if n > 0 {
 		log.Printf("[runner] recovered %d orphan run(s) from previous server shutdown", n)
 	}
 
@@ -237,6 +249,7 @@ func (r *Runner) Start(ctx context.Context) {
 		r.wg.Add(1)
 		go r.workerLoop(runCtx, i)
 	}
+	return nil
 }
 
 func (r *Runner) Stop() {
@@ -324,7 +337,7 @@ func (r *Runner) executeRun(ctx context.Context, run *domain.Run) {
 
 	// TOKEN INVARIANT: Revoke token immediately upon run completion
 	defer func() {
-		_ = r.store.RevokeTokensForRun(context.Background(), run.ID, time.Now().UTC())
+		_ = r.revokeTokensWithRetry(context.Background(), run.ID, time.Now().UTC())
 	}()
 
 	// 3. Prepare Runtime Sandbox Session
@@ -429,7 +442,7 @@ func (r *Runner) executeRun(ctx context.Context, run *domain.Run) {
 }
 
 func (r *Runner) finishRun(
-	ctx context.Context,
+	_ context.Context,
 	runID string,
 	status domain.RunStatus,
 	exitCode *int,
@@ -440,12 +453,52 @@ func (r *Runner) finishRun(
 	completedAt := time.Now().UTC()
 	durationMs := completedAt.Sub(startTime).Milliseconds()
 
-	// Revoke capability tokens immediately upon finalizing run status
-	_ = r.store.RevokeTokensForRun(ctx, runID, completedAt)
+	// Ensure cleanup/revocation and status update succeed even if run execution context was canceled
+	finishCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	_ = r.store.UpdateRunStatus(
-		ctx, runID, status, exitCode, stdout, stderr, durationMs, stderr, &completedAt,
+	// Revoke capability tokens immediately upon finalizing run status
+	_ = r.revokeTokensWithRetry(finishCtx, runID, completedAt)
+
+	_ = r.updateRunStatusWithRetry(
+		finishCtx, runID, status, exitCode, stdout, stderr, durationMs, stderr, &completedAt,
 	)
+}
+
+func (r *Runner) revokeTokensWithRetry(ctx context.Context, runID string, revokedAt time.Time) error {
+	var err error
+	for attempt := 1; attempt <= 5; attempt++ {
+		err = r.store.RevokeTokensForRun(ctx, runID, revokedAt)
+		if err == nil {
+			return nil
+		}
+		time.Sleep(time.Duration(attempt*10) * time.Millisecond)
+	}
+	log.Printf("[runner] CRITICAL: failed to revoke tokens for run %s after 5 attempts: %v", runID, err)
+	return err
+}
+
+func (r *Runner) updateRunStatusWithRetry(
+	ctx context.Context,
+	runID string,
+	status domain.RunStatus,
+	exitCode *int,
+	stdout string,
+	stderr string,
+	durationMs int64,
+	errMsg string,
+	completedAt *time.Time,
+) error {
+	var err error
+	for attempt := 1; attempt <= 5; attempt++ {
+		err = r.store.UpdateRunStatus(ctx, runID, status, exitCode, stdout, stderr, durationMs, errMsg, completedAt)
+		if err == nil {
+			return nil
+		}
+		time.Sleep(time.Duration(attempt*10) * time.Millisecond)
+	}
+	log.Printf("[runner] CRITICAL: failed to update run status for run %s to %s after 5 attempts: %v", runID, status, err)
+	return err
 }
 
 func truncateOutput(s string, limit int) string {

@@ -287,3 +287,46 @@ func TestRuntimeAPI_ScopeEnforcement(t *testing.T) {
 		t.Fatalf("expected 400 Bad Request when sandbox specifies instance_id, got %d", w4.Code)
 	}
 }
+
+func TestRuntimeAPI_PayloadSizeLimitEnforcement(t *testing.T) {
+	st, _, _, r := setupRuntimeTest(t)
+
+	tokenState, _ := createTestRunAndToken(t, st, "act_limit_1", []string{domain.ScopeStateWrite})
+	tokenSend, _ := createTestRunAndToken(t, st, "act_limit_2", []string{domain.ScopeFrostAgentSendMsg})
+
+	// 1. Oversized body on /state (> 8 MB) MUST return 413 StatusRequestEntityTooLarge
+	hugeStatePayload := make([]byte, 9*1024*1024)
+	for i := range hugeStatePayload {
+		hugeStatePayload[i] = 'A'
+	}
+	stateBody, _ := json.Marshal(WriteStateRequest{
+		Path: "huge.bin",
+		Data: string(hugeStatePayload),
+	})
+	reqState := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/state", bytes.NewReader(stateBody))
+	reqState.Header.Set("Authorization", "Bearer "+tokenState)
+	reqState.Header.Set("Content-Type", "application/json")
+	wState := httptest.NewRecorder()
+	r.ServeHTTP(wState, reqState)
+	if wState.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 for oversized state body, got %d: %s", wState.Code, wState.Body.String())
+	}
+
+	// 2. Oversized body on /frostagent/send (> 2 MB) MUST return 413 StatusRequestEntityTooLarge
+	hugeSendPayload := make([]byte, 3*1024*1024)
+	for i := range hugeSendPayload {
+		hugeSendPayload[i] = 'B'
+	}
+	sendBody, _ := json.Marshal(frostagent.SendMessageRequest{
+		Session:  "group:123",
+		Messages: []frostagent.MessageItem{{Type: "plain", Text: string(hugeSendPayload)}},
+	})
+	reqSend := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/frostagent/send", bytes.NewReader(sendBody))
+	reqSend.Header.Set("Authorization", "Bearer "+tokenSend)
+	reqSend.Header.Set("Content-Type", "application/json")
+	wSend := httptest.NewRecorder()
+	r.ServeHTTP(wSend, reqSend)
+	if wSend.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 for oversized send body, got %d: %s", wSend.Code, wSend.Body.String())
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -178,6 +179,7 @@ func TestClient_CreateSession_ContractFailClosed(t *testing.T) {
 
 	var receivedSessionReq gatewaySessionInitRequest
 	var returnStatus int = http.StatusCreated
+	var customRespBody []byte
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -188,9 +190,24 @@ func TestClient_CreateSession_ContractFailClosed(t *testing.T) {
 			if returnStatus != http.StatusNotFound {
 				_ = json.NewDecoder(r.Body).Decode(&receivedSessionReq)
 			}
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(returnStatus)
+			if customRespBody != nil {
+				_, _ = w.Write(customRespBody)
+				return
+			}
 			if returnStatus >= 400 {
 				_, _ = w.Write([]byte(`{"error":"profile contract not supported"}`))
+			} else if returnStatus == http.StatusOK || returnStatus == http.StatusCreated {
+				resp := map[string]any{
+					"user_uuid":            receivedSessionReq.UserUUID,
+					"profile":              receivedSessionReq.Profile,
+					"network":              receivedSessionReq.Network,
+					"allowed_hosts":        receivedSessionReq.AllowedHosts,
+					"status":               "ready",
+					"runtime_callback_url": receivedSessionReq.RuntimeCallbackURL,
+				}
+				_ = json.NewEncoder(w).Encode(resp)
 			}
 		default:
 			http.NotFound(w, r)
@@ -265,6 +282,7 @@ func TestClient_CreateSession_ContractFailClosed(t *testing.T) {
 
 	// 5. NetworkPolicy.Allow propagation across client boundary
 	returnStatus = http.StatusCreated
+	customRespBody = nil
 	_, err = client.CreateSession(ctx, SessionRequest{
 		SessionID: "sess_allowlist",
 		Profile:   ProfileRuntime,
@@ -310,28 +328,10 @@ func TestClient_CreateSession_ContractFailClosed(t *testing.T) {
 	if !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("expected ErrInvalidRequest for empty allowlist, got: %v", err)
 	}
+
 	// 7. Effective Runtime Callback URL from Gateway response is recorded in SessionHandle
 	returnStatus = http.StatusCreated
-	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/status":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"status":"ok"}`))
-		case "/api/v1/sessions":
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{
-				"user_uuid": "mock-uuid-effective",
-				"profile": "action-runtime",
-				"network": "isolated",
-				"status": "ready",
-				"runtime_callback_url": "http://172.28.0.2:3874/api/v1/sessions/mock-uuid-effective/callback"
-			}`))
-		default:
-			http.NotFound(w, r)
-		}
-	})
-
+	customRespBody = nil
 	handleProxy, err := client.CreateSession(ctx, SessionRequest{
 		SessionID:          "sess_proxy_effective",
 		Profile:            ProfileRuntime,
@@ -344,8 +344,138 @@ func TestClient_CreateSession_ContractFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected successful CreateSession with proxy, got: %v", err)
 	}
-	if handleProxy.RuntimeCallbackURL != "http://172.28.0.2:3874/api/v1/sessions/mock-uuid-effective/callback" {
-		t.Fatalf("expected effective proxy URL in handle, got %s", handleProxy.RuntimeCallbackURL)
+	if handleProxy.RuntimeCallbackURL != "http://host.docker.internal:7999/api/v1/runtime" {
+		t.Fatalf("expected callback URL in handle, got %s", handleProxy.RuntimeCallbackURL)
+	}
+
+	// 8. Gateway returns 204 No Content -> MUST FAIL CLOSED with ErrSandboxUnavailable!
+	returnStatus = http.StatusNoContent
+	customRespBody = nil
+	_, err = client.CreateSession(ctx, SessionRequest{
+		SessionID: "sess_204",
+		Profile:   ProfileRuntime,
+	})
+	if err == nil || !errors.Is(err, ErrSandboxUnavailable) {
+		t.Fatalf("expected ErrSandboxUnavailable on 204 No Content, got: %v", err)
+	}
+
+	// 9. Gateway returns corrupted/invalid JSON -> MUST FAIL CLOSED with ErrSandboxUnavailable!
+	returnStatus = http.StatusOK
+	customRespBody = []byte("{invalid-json")
+	_, err = client.CreateSession(ctx, SessionRequest{
+		SessionID: "sess_bad_json",
+		Profile:   ProfileRuntime,
+	})
+	if err == nil || !errors.Is(err, ErrSandboxUnavailable) {
+		t.Fatalf("expected ErrSandboxUnavailable on bad JSON, got: %v", err)
+	}
+
+	// 10. Gateway returns user_uuid mismatch -> MUST FAIL CLOSED with ErrProfileNotSupported!
+	returnStatus = http.StatusOK
+	customRespBody = []byte(`{"user_uuid":"attacker-uuid","profile":"action-runtime","status":"ready"}`)
+	_, err = client.CreateSession(ctx, SessionRequest{
+		SessionID: "sess_uuid_mismatch",
+		Profile:   ProfileRuntime,
+	})
+	if err == nil || !errors.Is(err, ErrProfileNotSupported) {
+		t.Fatalf("expected ErrProfileNotSupported on user_uuid mismatch, got: %v", err)
+	}
+
+	// 11. Gateway returns profile mismatch -> MUST FAIL CLOSED with ErrProfileNotSupported!
+	returnStatus = http.StatusOK
+	uuidMismatch := client.SessionIDToUUID("sess_prof_mismatch")
+	customRespBody = fmt.Appendf(nil, `{"user_uuid":%q,"profile":"minimal","status":"ready"}`, uuidMismatch)
+	_, err = client.CreateSession(ctx, SessionRequest{
+		SessionID: "sess_prof_mismatch",
+		Profile:   ProfileRuntime,
+	})
+	if err == nil || !errors.Is(err, ErrProfileNotSupported) {
+		t.Fatalf("expected ErrProfileNotSupported on profile mismatch, got: %v", err)
+	}
+
+	// 12. Gateway returns missing allowed host -> MUST FAIL CLOSED with ErrProfileNotSupported!
+	returnStatus = http.StatusOK
+	uuidAllowMismatch := client.SessionIDToUUID("sess_allow_mismatch")
+	customRespBody = fmt.Appendf(nil, `{"user_uuid":%q,"profile":"action-runtime","network":"allowlist","allowed_hosts":["other.com"],"status":"ready"}`, uuidAllowMismatch)
+	_, err = client.CreateSession(ctx, SessionRequest{
+		SessionID: "sess_allow_mismatch",
+		Profile:   ProfileRuntime,
+		Network: domain.NetworkPolicy{
+			Mode: domain.NetworkModeAllowlist,
+			Allow: []domain.NetworkAllowRule{
+				{Host: "required.com"},
+			},
+		},
+	})
+	if err == nil || !errors.Is(err, ErrProfileNotSupported) {
+		t.Fatalf("expected ErrProfileNotSupported on allowlist mismatch, got: %v", err)
+	}
+
+	// 13. Gateway returns status != ready/created -> MUST FAIL CLOSED with ErrSandboxUnavailable!
+	returnStatus = http.StatusOK
+	uuidPending := client.SessionIDToUUID("sess_pending")
+	customRespBody = fmt.Appendf(nil, `{"user_uuid":%q,"profile":"action-runtime","status":"pending"}`, uuidPending)
+	_, err = client.CreateSession(ctx, SessionRequest{
+		SessionID: "sess_pending",
+		Profile:   ProfileRuntime,
+	})
+	if err == nil || !errors.Is(err, ErrSandboxUnavailable) {
+		t.Fatalf("expected ErrSandboxUnavailable on status pending, got: %v", err)
+	}
+}
+
+func TestClient_ExportFiles_LimitEnforcement(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a mock server that simulates returning chunks exceeding 64MB
+	chunkCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/shell/exec":
+			var req gatewayExecRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			w.Header().Set("Content-Type", "application/json")
+			exitCode := 0
+
+			if containsStr(req.Command, "if [ -f") {
+				resp := gatewayExecResponse{
+					Stdout:   "/sandbox/huge-file.bin\n",
+					ExitCode: &exitCode,
+				}
+				_ = json.NewEncoder(w).Encode(resp)
+				return
+			}
+
+			// Simulating chunk return of 512KB base64
+			chunkCount++
+			// 512KB of 'A' encoded in base64
+			b64Chunk := make([]byte, 699052)
+			for i := range b64Chunk {
+				b64Chunk[i] = 'A'
+			}
+			resp := gatewayExecResponse{
+				Stdout:   string(b64Chunk) + "\n",
+				ExitCode: &exitCode,
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		BaseURL:          server.URL,
+		AuthToken:        "tok",
+		SessionNamespace: "test",
+	})
+
+	_, err := client.ExportFiles(ctx, "sess_large", []string{"huge-file.bin"})
+	if err == nil {
+		t.Fatal("expected ExportFiles to fail when exceeding 64MB, got nil error")
+	}
+	if !errors.Is(err, ErrArtifactTooLarge) {
+		t.Fatalf("expected ErrArtifactTooLarge, got: %v", err)
 	}
 }
 
@@ -358,14 +488,18 @@ func TestClient_ExecEnvIsolation_DoesNotClobberContainerEnv(t *testing.T) {
 		case "/api/v1/status":
 			w.WriteHeader(http.StatusOK)
 		case "/api/v1/sessions":
+			var req gatewaySessionInitRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{
-				"user_uuid": "user-exec-test",
-				"profile": "action-runtime",
-				"network": "isolated",
-				"runtime_callback_url": "http://172.28.0.2:3874/api/v1/sessions/user-exec-test/callback"
-			}`))
+			resp := map[string]any{
+				"user_uuid":            req.UserUUID,
+				"profile":              req.Profile,
+				"network":              req.Network,
+				"status":               "ready",
+				"runtime_callback_url": "http://172.28.0.2:3874/api/v1/sessions/" + req.UserUUID + "/callback",
+			}
+			_ = json.NewEncoder(w).Encode(resp)
 		case "/api/v1/shell/exec":
 			var req gatewayExecRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)

@@ -1,12 +1,23 @@
 package store
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+)
+
+const (
+	// MaxArtifactTotalBytes defines the maximum total size of an artifact bundle (64 MB).
+	MaxArtifactTotalBytes = 64 * 1024 * 1024
+)
+
+var (
+	ErrArtifactTooLarge = errors.New("artifact bundle exceeds maximum size (64MB)")
 )
 
 // FileStore manages persistent source code files and immutable built artifact bundles.
@@ -18,16 +29,20 @@ func NewFileStore(dataDir string) *FileStore {
 	return &FileStore{dataDir: dataDir}
 }
 
-// SaveSourceBundle saves source files for an ActionVersion and returns the SHA256 digest and relative path.
-func (f *FileStore) SaveSourceBundle(actionID, versionID string, files map[string][]byte) (string, string, error) {
-	relDir := filepath.Join("actions", actionID, "versions", versionID, "source")
-	absDir := filepath.Join(f.dataDir, relDir)
+// StageSourceBundle writes source files into an isolated staging directory, calculates the SHA256 digest,
+// and returns the digest and a temporary stageToken.
+func (f *FileStore) StageSourceBundle(actionID string, files map[string][]byte) (string, string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", fmt.Errorf("failed to generate staging token: %w", err)
+	}
+	stageToken := hex.EncodeToString(b)
 
-	if err := os.MkdirAll(absDir, 0750); err != nil {
-		return "", "", fmt.Errorf("failed to create source dir: %w", err)
+	stageDir := filepath.Join(f.dataDir, "actions", actionID, "staging", stageToken, "source")
+	if err := os.MkdirAll(stageDir, 0750); err != nil {
+		return "", "", fmt.Errorf("failed to create staging source dir: %w", err)
 	}
 
-	// Sort file paths for deterministic bundle hashing
 	keys := make([]string, 0, len(files))
 	for k := range files {
 		keys = append(keys, k)
@@ -38,20 +53,22 @@ func (f *FileStore) SaveSourceBundle(actionID, versionID string, files map[strin
 	for _, name := range keys {
 		cleanName, err := sanitizeStatePath(name)
 		if err != nil {
+			_ = os.RemoveAll(filepath.Join(f.dataDir, "actions", actionID, "staging", stageToken))
 			return "", "", fmt.Errorf("invalid source filename %q: %w", name, err)
 		}
 
-		filePath := filepath.Join(absDir, filepath.FromSlash(cleanName))
+		filePath := filepath.Join(stageDir, filepath.FromSlash(cleanName))
 		if err := os.MkdirAll(filepath.Dir(filePath), 0750); err != nil {
-			return "", "", fmt.Errorf("failed to create sub dir: %w", err)
+			_ = os.RemoveAll(filepath.Join(f.dataDir, "actions", actionID, "staging", stageToken))
+			return "", "", fmt.Errorf("failed to create staging sub dir: %w", err)
 		}
 
 		data := files[name]
 		if err := os.WriteFile(filePath, data, 0640); err != nil {
-			return "", "", fmt.Errorf("failed to write source file %q: %w", name, err)
+			_ = os.RemoveAll(filepath.Join(f.dataDir, "actions", actionID, "staging", stageToken))
+			return "", "", fmt.Errorf("failed to write staging source file %q: %w", name, err)
 		}
 
-		// Feed into deterministic bundle hash
 		bundleHasher.Write([]byte(cleanName))
 		bundleHasher.Write([]byte{0})
 		bundleHasher.Write(data)
@@ -59,6 +76,46 @@ func (f *FileStore) SaveSourceBundle(actionID, versionID string, files map[strin
 	}
 
 	digest := hex.EncodeToString(bundleHasher.Sum(nil))
+	return digest, stageToken, nil
+}
+
+// CommitSourceBundle atomically moves a staged source bundle to its final version directory.
+func (f *FileStore) CommitSourceBundle(actionID, stageToken, versionID string) (string, error) {
+	stagedVersionDir := filepath.Join(f.dataDir, "actions", actionID, "staging", stageToken)
+	destVersionDir := filepath.Join(f.dataDir, "actions", actionID, "versions", versionID)
+	relDir := filepath.Join("actions", actionID, "versions", versionID, "source")
+
+	if err := os.MkdirAll(filepath.Dir(destVersionDir), 0750); err != nil {
+		return "", fmt.Errorf("failed to ensure versions dir: %w", err)
+	}
+
+	if err := os.Rename(stagedVersionDir, destVersionDir); err != nil {
+		return "", fmt.Errorf("failed to atomically commit source bundle: %w", err)
+	}
+
+	// Clean up empty staging parent if possible
+	_ = os.Remove(filepath.Join(f.dataDir, "actions", actionID, "staging"))
+
+	return relDir, nil
+}
+
+// DiscardSourceBundle removes a staged source bundle if version creation fails.
+func (f *FileStore) DiscardSourceBundle(actionID, stageToken string) error {
+	stagedVersionDir := filepath.Join(f.dataDir, "actions", actionID, "staging", stageToken)
+	return os.RemoveAll(stagedVersionDir)
+}
+
+// SaveSourceBundle saves source files for an ActionVersion and returns the SHA256 digest and relative path.
+func (f *FileStore) SaveSourceBundle(actionID, versionID string, files map[string][]byte) (string, string, error) {
+	digest, token, err := f.StageSourceBundle(actionID, files)
+	if err != nil {
+		return "", "", err
+	}
+	relDir, err := f.CommitSourceBundle(actionID, token, versionID)
+	if err != nil {
+		_ = f.DiscardSourceBundle(actionID, token)
+		return "", "", err
+	}
 	return digest, relDir, nil
 }
 
@@ -93,6 +150,14 @@ func (f *FileStore) ReadSourceBundle(actionID, versionID string) (map[string][]b
 
 // SaveArtifactBundle stores built artifact files and marks them read-only.
 func (f *FileStore) SaveArtifactBundle(actionID, versionID, buildID string, files map[string][]byte) (string, string, int64, error) {
+	var expectedTotal int64
+	for _, data := range files {
+		expectedTotal += int64(len(data))
+	}
+	if expectedTotal > MaxArtifactTotalBytes {
+		return "", "", 0, fmt.Errorf("%w: total artifact size %d exceeds limit of %d bytes", ErrArtifactTooLarge, expectedTotal, MaxArtifactTotalBytes)
+	}
+
 	relDir := filepath.Join("actions", actionID, "versions", versionID, "builds", buildID, "artifact")
 	absDir := filepath.Join(f.dataDir, relDir)
 

@@ -274,7 +274,9 @@ func main() {
 		RuntimeEndpoint:           fmt.Sprintf("http://127.0.0.1:%d/api/v1/runtime", rtPort),
 		AdvertisedRuntimeEndpoint: advertisedRuntimeURL,
 	})
-	r.Start(ctx)
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("start runner: %v", err)
+	}
 	defer r.Stop()
 
 	plannedEnv := map[string]string{

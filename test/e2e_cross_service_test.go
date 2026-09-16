@@ -104,7 +104,16 @@ func setupMockCodeInterpreterServer(t *testing.T, expectedAuthToken string) (*ht
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprintf(w, `{"session_id":%q,"user_uuid":%q,"status":"created"}`, req.UserUUID, req.UserUUID)
+		resp := map[string]any{
+			"session_id":           req.UserUUID,
+			"user_uuid":            req.UserUUID,
+			"profile":              req.Profile,
+			"network":              req.Network,
+			"allowed_hosts":        req.AllowedHosts,
+			"status":               "ready",
+			"runtime_callback_url": req.RuntimeCallbackURL,
+		}
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 
 	// 3. Shell Exec (POST /api/v1/shell/exec)
@@ -344,7 +353,9 @@ func TestActionsCat_HTTPContractWiring(t *testing.T) {
 	coreServer.Runner.SetEndpoints(realRuntimeEndpoint, realRuntimeEndpoint)
 
 	// Start asynchronous background worker pool
-	coreServer.Runner.Start(ctx)
+	if err := coreServer.Runner.Start(ctx); err != nil {
+		t.Fatalf("start runner: %v", err)
+	}
 	t.Cleanup(func() { coreServer.Runner.Stop() })
 
 	// -------------------------------------------------------------

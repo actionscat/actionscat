@@ -15,7 +15,9 @@ import (
 )
 
 const (
-	maxStateWriteBytes = 5 * 1024 * 1024 // 5 MB
+	maxStateWriteBytes    = 5 * 1024 * 1024 // 5 MB payload limit
+	maxStateWriteReqBytes = 8 * 1024 * 1024 // 8 MB HTTP body limit (to account for json/base64 overhead)
+	maxFrostAgentReqBytes = 2 * 1024 * 1024 // 2 MB HTTP body limit
 )
 
 type contextKey string
@@ -116,8 +118,15 @@ func (a *API) HandleWriteState(c *gin.Context) {
 		return
 	}
 
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxStateWriteReqBytes)
+
 	var req WriteStateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body exceeds maximum size limit"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body: " + err.Error()})
 		return
 	}
@@ -171,8 +180,15 @@ func (a *API) HandleFrostAgentSend(c *gin.Context) {
 		return
 	}
 
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxFrostAgentReqBytes)
+
 	var req frostagent.SendMessageRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body exceeds maximum size limit"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body: " + err.Error()})
 		return
 	}

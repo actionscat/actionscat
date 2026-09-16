@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -63,6 +64,7 @@ type Service struct {
 	store     *store.SQLiteStore
 	fileStore *store.FileStore
 	sandbox   sandbox.Backend
+	actionMu  sync.Map
 }
 
 func NewService(store *store.SQLiteStore, fileStore *store.FileStore, sandbox sandbox.Backend) *Service {
@@ -71,6 +73,11 @@ func NewService(store *store.SQLiteStore, fileStore *store.FileStore, sandbox sa
 		fileStore: fileStore,
 		sandbox:   sandbox,
 	}
+}
+
+func (s *Service) getActionMutex(actionID string) *sync.Mutex {
+	v, _ := s.actionMu.LoadOrStore(actionID, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 func randomID(prefix string) string {
@@ -155,18 +162,29 @@ func (s *Service) CreateVersion(ctx context.Context, actionID string, req Create
 		return nil, ErrSourceTooLarge
 	}
 
+	// Synchronize concurrent version creations for the same action
+	mu := s.getActionMutex(actionID)
+	mu.Lock()
+	defer mu.Unlock()
+
 	verNum, err := s.store.GetNextVersionNumber(ctx, actionID)
 	if err != nil {
 		return nil, err
 	}
 
-	verID := fmt.Sprintf("ver_%06d", verNum)
+	// ActionVersion ID must be globally unique across actions!
+	verID := fmt.Sprintf("ver_%s_%06d", actionID, verNum)
 
-	// Save source files into filesystem store
-	digest, relPath, err := s.fileStore.SaveSourceBundle(actionID, verID, req.Files)
+	// Stage source files into temporary staging directory first
+	digest, stageToken, err := s.fileStore.StageSourceBundle(actionID, req.Files)
 	if err != nil {
-		return nil, fmt.Errorf("failed to save source bundle: %w", err)
+		return nil, fmt.Errorf("failed to stage source bundle: %w", err)
 	}
+	defer func() {
+		if stageToken != "" {
+			_ = s.fileStore.DiscardSourceBundle(actionID, stageToken)
+		}
+	}()
 
 	// Set defaults
 	if req.BuildSpec.Command == "" {
@@ -182,6 +200,7 @@ func (s *Service) CreateVersion(ctx context.Context, actionID string, req Create
 		req.RuntimeSpec.TimeoutSeconds = 60
 	}
 
+	relPath := fmt.Sprintf("actions/%s/versions/%s/source", actionID, verID)
 	now := time.Now().UTC()
 	v := &domain.ActionVersion{
 		ID:                  verID,
@@ -199,6 +218,15 @@ func (s *Service) CreateVersion(ctx context.Context, actionID string, req Create
 	if err := s.store.CreateVersion(ctx, v); err != nil {
 		return nil, err
 	}
+
+	// Atomically commit staged source bundle upon successful DB insertion
+	committedPath, err := s.fileStore.CommitSourceBundle(actionID, stageToken, verID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to commit source bundle: %w", err)
+	}
+	stageToken = "" // successfully committed, disarm defer cleanup
+	v.SourcePath = committedPath
+
 	return v, nil
 }
 
