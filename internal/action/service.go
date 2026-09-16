@@ -240,10 +240,23 @@ func (s *Service) CleanOrphanedVersions(ctx context.Context, actionID string) (i
 	}
 	cleaned := 0
 	for _, verID := range storedIDs {
-		_, err := s.store.GetVersion(ctx, verID)
+		ver, err := s.store.GetVersion(ctx, verID)
 		if err != nil {
-			// Version does not exist in DB -> orphan from a crashed/aborted attempt
-			_ = s.fileStore.DeleteSourceBundle(actionID, verID)
+			if errors.Is(err, store.ErrNotFound) {
+				// Version genuinely does not exist in DB -> orphan from a crashed/aborted attempt
+				if err := s.fileStore.DeleteSourceBundle(actionID, verID); err != nil {
+					return cleaned, fmt.Errorf("failed to delete orphaned source bundle %s: %w", verID, err)
+				}
+				cleaned++
+				continue
+			}
+			// Transient DB error, connection loss, context cancellation, etc. MUST fail-closed and not delete valid source files!
+			return cleaned, fmt.Errorf("failed to lookup version %s during orphan cleanup: %w", verID, err)
+		}
+		if ver.ActionID != actionID {
+			if err := s.fileStore.DeleteSourceBundle(actionID, verID); err != nil {
+				return cleaned, fmt.Errorf("failed to delete mismatched source bundle %s: %w", verID, err)
+			}
 			cleaned++
 		}
 	}

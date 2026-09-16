@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -197,6 +198,7 @@ func TestActionService_CreateVersion_DBFailure_RollsBackFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open test db: %v", err)
 	}
+	t.Cleanup(func() { _ = db.Close() })
 
 	st := store.NewSQLiteStore(db)
 	fs := store.NewFileStore(tempDir)
@@ -209,18 +211,35 @@ func TestActionService_CreateVersion_DBFailure_RollsBackFiles(t *testing.T) {
 		t.Fatalf("create action: %v", err)
 	}
 
-	// Close database to trigger guaranteed failure during CreateVersion DB insertion
-	_ = db.Close()
+	// Install a SQLite trigger specifically on action_versions INSERT so:
+	// 1. GetAction succeeds
+	// 2. GetNextVersionNumber succeeds
+	// 3. StageSourceBundle succeeds
+	// 4. CommitSourceBundle succeeds (file is committed to destination directory)
+	// 5. store.CreateVersion (INSERT INTO action_versions) fails deterministically!
+	_, err = db.Exec(`
+		CREATE TRIGGER fail_version_insert
+		BEFORE INSERT ON action_versions
+		BEGIN
+			SELECT RAISE(ABORT, 'simulated database insert failure');
+		END;
+	`)
+	if err != nil {
+		t.Fatalf("failed to create failure trigger: %v", err)
+	}
 
 	expectedVerID := fmt.Sprintf("ver_%s_%06d", act.ID, 1)
 	_, err = svc.CreateVersion(ctx, act.ID, CreateVersionRequest{
 		Files: map[string][]byte{"main.go": []byte("package main\n")},
 	})
 	if err == nil {
-		t.Fatal("expected CreateVersion to fail when DB is closed")
+		t.Fatal("expected CreateVersion to fail when DB insert fails")
+	}
+	if !strings.Contains(err.Error(), "simulated database insert failure") {
+		t.Fatalf("expected error from trigger abort, got: %v", err)
 	}
 
-	// Verify that committed files were rolled back and no corrupted files remain on disk!
+	// Verify that committed files were rolled back by DeleteSourceBundle and no corrupted files remain on disk!
 	_, err = fs.ReadSourceBundle(act.ID, expectedVerID)
 	if err == nil {
 		t.Fatalf("security violation: expected source bundle for %s to be rolled back, but it exists on disk", expectedVerID)
@@ -231,6 +250,98 @@ func TestActionService_CreateVersion_DBFailure_RollsBackFiles(t *testing.T) {
 	entries, _ := os.ReadDir(stagingDir)
 	if len(entries) > 0 {
 		t.Fatalf("expected staging directory to be cleaned, found %d entries", len(entries))
+	}
+
+	// Drop trigger and verify that CreateVersion now succeeds without error or collision
+	_, err = db.Exec(`DROP TRIGGER fail_version_insert;`)
+	if err != nil {
+		t.Fatalf("failed to drop trigger: %v", err)
+	}
+
+	v1, err := svc.CreateVersion(ctx, act.ID, CreateVersionRequest{
+		Files: map[string][]byte{"main.go": []byte("package main\n// retry succeeds\n")},
+	})
+	if err != nil {
+		t.Fatalf("expected version creation to succeed after trigger removal: %v", err)
+	}
+	if v1.VersionNumber != 1 {
+		t.Fatalf("expected version number 1, got %d", v1.VersionNumber)
+	}
+	savedFiles, err := fs.ReadSourceBundle(act.ID, v1.ID)
+	if err != nil {
+		t.Fatalf("failed to read source bundle after successful creation: %v", err)
+	}
+	if string(savedFiles["main.go"]) != "package main\n// retry succeeds\n" {
+		t.Fatalf("unexpected saved content: %s", string(savedFiles["main.go"]))
+	}
+}
+
+func TestActionService_CleanOrphanedVersions_DBLookupError_DoesNotDeleteValidFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	db, err := store.OpenDB(filepath.Join(tempDir, "test.db"))
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	st := store.NewSQLiteStore(db)
+	fs := store.NewFileStore(tempDir)
+	sb := sandbox.NewFakeBackend()
+	svc := NewService(st, fs, sb)
+
+	ctx := context.Background()
+	act, err := svc.CreateAction(ctx, CreateActionRequest{Name: "Lookup Fail Action"})
+	if err != nil {
+		t.Fatalf("create action: %v", err)
+	}
+
+	// Create a valid version 1 with important files
+	v1, err := svc.CreateVersion(ctx, act.ID, CreateVersionRequest{
+		Files: map[string][]byte{"main.go": []byte("package main // important valid code\n")},
+	})
+	if err != nil {
+		t.Fatalf("create version: %v", err)
+	}
+
+	// Verify files are indeed stored on disk
+	initialFiles, err := fs.ReadSourceBundle(act.ID, v1.ID)
+	if err != nil || len(initialFiles) == 0 {
+		t.Fatalf("expected source bundle to exist on disk: %v", err)
+	}
+
+	// 1. When Context is canceled: CleanOrphanedVersions must return error and NOT delete files!
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	cleaned, err := svc.CleanOrphanedVersions(canceledCtx, act.ID)
+	if err == nil {
+		t.Fatal("expected CleanOrphanedVersions to fail on canceled context")
+	}
+	if cleaned != 0 {
+		t.Fatalf("expected 0 cleaned on error, got %d", cleaned)
+	}
+
+	// Files MUST STILL EXIST!
+	filesAfterCancel, err := fs.ReadSourceBundle(act.ID, v1.ID)
+	if err != nil || string(filesAfterCancel["main.go"]) != "package main // important valid code\n" {
+		t.Fatalf("data loss! valid source bundle was deleted or corrupted on canceled context: %v", err)
+	}
+
+	// 2. When database lookup fails (e.g. underlying DB connection closed)
+	_ = db.Close()
+
+	cleaned, err = svc.CleanOrphanedVersions(ctx, act.ID)
+	if err == nil {
+		t.Fatal("expected CleanOrphanedVersions to fail when database is closed")
+	}
+	if cleaned != 0 {
+		t.Fatalf("expected 0 cleaned on DB error, got %d", cleaned)
+	}
+
+	// Files MUST STILL EXIST on disk!
+	filesAfterClose, err := fs.ReadSourceBundle(act.ID, v1.ID)
+	if err != nil || string(filesAfterClose["main.go"]) != "package main // important valid code\n" {
+		t.Fatalf("data loss! valid source bundle was deleted on DB lookup error: %v", err)
 	}
 }
 
