@@ -21,6 +21,11 @@ Thumbs.db
 
 # Go specific
 *.test
+*.db
+/data/
+
+# Claude
+.claude/
 
 # OneDrive
 ~$*
