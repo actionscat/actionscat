@@ -215,19 +215,39 @@ func (s *Service) CreateVersion(ctx context.Context, actionID string, req Create
 		CreatedAt:           now,
 	}
 
-	if err := s.store.CreateVersion(ctx, v); err != nil {
-		return nil, err
-	}
-
-	// Atomically commit staged source bundle upon successful DB insertion
+	// Atomically commit staged source bundle to disk FIRST so no visible DB record exists without files!
 	committedPath, err := s.fileStore.CommitSourceBundle(actionID, stageToken, verID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to commit source bundle: %w", err)
 	}
-	stageToken = "" // successfully committed, disarm defer cleanup
+	stageToken = "" // successfully committed, disarm staging discard defer
 	v.SourcePath = committedPath
 
+	// Persist version record to DB. If DB insertion fails, roll back committed source directory!
+	if err := s.store.CreateVersion(ctx, v); err != nil {
+		_ = s.fileStore.DeleteSourceBundle(actionID, verID)
+		return nil, fmt.Errorf("failed to create version record in store: %w", err)
+	}
+
 	return v, nil
+}
+
+// CleanOrphanedVersions cleans up any on-disk version directories that have no corresponding record in the database.
+func (s *Service) CleanOrphanedVersions(ctx context.Context, actionID string) (int, error) {
+	storedIDs, err := s.fileStore.ListStoredVersionIDs(actionID)
+	if err != nil {
+		return 0, err
+	}
+	cleaned := 0
+	for _, verID := range storedIDs {
+		_, err := s.store.GetVersion(ctx, verID)
+		if err != nil {
+			// Version does not exist in DB -> orphan from a crashed/aborted attempt
+			_ = s.fileStore.DeleteSourceBundle(actionID, verID)
+			cleaned++
+		}
+	}
+	return cleaned, nil
 }
 
 func (s *Service) GetVersion(ctx context.Context, versionID string) (*domain.ActionVersion, error) {

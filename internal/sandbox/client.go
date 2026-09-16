@@ -197,15 +197,37 @@ func (c *Client) CreateSession(ctx context.Context, req SessionRequest) (*Sessio
 		return nil, fmt.Errorf("%w: gateway network mismatch (expected %q, got %q)", ErrProfileNotSupported, req.Network.Mode, initResp.Network)
 	}
 	if req.Network.Mode == domain.NetworkModeAllowlist {
-		returnedHosts := make(map[string]bool, len(initResp.AllowedHosts))
-		for _, h := range initResp.AllowedHosts {
-			returnedHosts[h] = true
-		}
+		// Normalize requested hosts into unique set
+		reqHostSet := make(map[string]bool, len(allowedHosts))
 		for _, h := range allowedHosts {
-			if !returnedHosts[h] {
+			norm := strings.ToLower(strings.TrimSpace(h))
+			if norm != "" {
+				reqHostSet[norm] = true
+			}
+		}
+
+		// Normalize returned hosts into unique set
+		respHostSet := make(map[string]bool, len(initResp.AllowedHosts))
+		for _, h := range initResp.AllowedHosts {
+			norm := strings.ToLower(strings.TrimSpace(h))
+			if norm != "" {
+				respHostSet[norm] = true
+			}
+		}
+
+		// Verify exact set equality: no missing hosts and no unexpected extra hosts
+		for h := range reqHostSet {
+			if !respHostSet[h] {
 				return nil, fmt.Errorf("%w: gateway missing requested allowed host %q", ErrProfileNotSupported, h)
 			}
 		}
+		for h := range respHostSet {
+			if !reqHostSet[h] {
+				return nil, fmt.Errorf("%w: gateway returned unexpected extra allowed host %q", ErrProfileNotSupported, h)
+			}
+		}
+	} else if len(initResp.AllowedHosts) > 0 {
+		return nil, fmt.Errorf("%w: gateway returned allowed_hosts for non-allowlist network mode %q", ErrProfileNotSupported, req.Network.Mode)
 	}
 	if initResp.Status != "ready" && initResp.Status != "created" {
 		return nil, fmt.Errorf("%w: gateway session status not ready (%q)", ErrSandboxUnavailable, initResp.Status)
@@ -429,14 +451,17 @@ func (c *Client) ExportFiles(ctx context.Context, sessionID string, paths []stri
 	const exportChunkBytes = 524288 // 512 KB per chunk -> ~683 KB base64, safely within 1MB stream drain limit
 	var totalExportedBytes int64
 
+	// Deduplicate exported targets so candidate/alias paths pointing to the same file do not duplicate bytes or memory
+	exportedTargets := make(map[string][]byte)
+
 	for _, p := range paths {
 		cleanRel := strings.TrimPrefix(p, "/")
 		cleanRel = strings.TrimPrefix(cleanRel, "sandbox/")
 
-		// Check /sandbox/<path> as well as root /<path>
+		// Check /sandbox/<path> as well as root /<path>, resolving symlinks to real canonical path
 		findCmd := fmt.Sprintf(
-			"if [ -f \"/sandbox/%s\" ]; then echo \"/sandbox/%s\"; elif [ -f \"/%s\" ]; then echo \"/%s\"; fi",
-			cleanRel, cleanRel, cleanRel, cleanRel,
+			"if [ -f \"/sandbox/%s\" ]; then readlink -f \"/sandbox/%s\" 2>/dev/null || echo \"/sandbox/%s\"; elif [ -f \"/%s\" ]; then readlink -f \"/%s\" 2>/dev/null || echo \"/%s\"; fi",
+			cleanRel, cleanRel, cleanRel, cleanRel, cleanRel, cleanRel,
 		)
 		findRes, err := c.Exec(ctx, ExecRequest{
 			SessionID: sessionID,
@@ -449,6 +474,12 @@ func (c *Client) ExportFiles(ctx context.Context, sessionID string, paths []stri
 		}
 		targetFile := strings.TrimSpace(findRes.Stdout)
 		if targetFile == "" {
+			continue
+		}
+
+		// If this canonical file has already been exported, reuse its content without re-reading or double counting
+		if cachedData, ok := exportedTargets[targetFile]; ok {
+			out[p] = cachedData
 			continue
 		}
 
@@ -489,7 +520,9 @@ func (c *Client) ExportFiles(ctx context.Context, sessionID string, paths []stri
 			}
 			skip++
 		}
-		out[p] = fileBuf.Bytes()
+		exportedBytes := fileBuf.Bytes()
+		exportedTargets[targetFile] = exportedBytes
+		out[p] = exportedBytes
 	}
 	return out, nil
 }

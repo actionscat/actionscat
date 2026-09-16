@@ -157,6 +157,8 @@ func (f *FakeBackend) ExportFiles(ctx context.Context, sessionID string, paths [
 	for _, p := range paths {
 		if data, ok := sess.Files[p]; ok {
 			out[p] = data
+		} else if data, ok := sess.Files[p[strings.LastIndex(p, "/")+1:]]; ok {
+			out[p] = data
 		}
 	}
 	// If paths requested was empty, export all files
@@ -164,9 +166,15 @@ func (f *FakeBackend) ExportFiles(ctx context.Context, sessionID string, paths [
 		maps.Copy(out, sess.Files)
 	}
 
+	// Calculate total unique size so duplicate path aliases do not inflate byte count
+	seenFiles := make(map[string]bool)
 	var totalSize int64
-	for _, data := range out {
-		totalSize += int64(len(data))
+	for path, data := range out {
+		cleanName := path[strings.LastIndex(path, "/")+1:]
+		if !seenFiles[cleanName] {
+			seenFiles[cleanName] = true
+			totalSize += int64(len(data))
+		}
 	}
 	if totalSize > MaxArtifactTotalBytes {
 		return nil, fmt.Errorf("%w: total artifact size %d exceeds limit of %d bytes", ErrArtifactTooLarge, totalSize, MaxArtifactTotalBytes)

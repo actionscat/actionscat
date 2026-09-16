@@ -3,11 +3,13 @@ package sandbox
 import (
 	"actionscat/internal/domain"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -188,6 +190,7 @@ func TestClient_CreateSession_ContractFailClosed(t *testing.T) {
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		case "/api/v1/sessions":
 			if returnStatus != http.StatusNotFound {
+				receivedSessionReq = gatewaySessionInitRequest{}
 				_ = json.NewDecoder(r.Body).Decode(&receivedSessionReq)
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -422,6 +425,42 @@ func TestClient_CreateSession_ContractFailClosed(t *testing.T) {
 	if err == nil || !errors.Is(err, ErrSandboxUnavailable) {
 		t.Fatalf("expected ErrSandboxUnavailable on status pending, got: %v", err)
 	}
+
+	// 14. Gateway returns unexpected extra allowed host -> MUST FAIL CLOSED with ErrProfileNotSupported!
+	returnStatus = http.StatusOK
+	uuidAllowExtra := client.SessionIDToUUID("sess_allow_extra")
+	customRespBody = fmt.Appendf(nil, `{"user_uuid":%q,"profile":"action-runtime","network":"allowlist","allowed_hosts":["required.com:443","attacker.example:443"],"status":"ready"}`, uuidAllowExtra)
+	_, err = client.CreateSession(ctx, SessionRequest{
+		SessionID: "sess_allow_extra",
+		Profile:   ProfileRuntime,
+		Network: domain.NetworkPolicy{
+			Mode: domain.NetworkModeAllowlist,
+			Allow: []domain.NetworkAllowRule{
+				{Host: "required.com", Port: 443},
+			},
+		},
+	})
+	if err == nil || !errors.Is(err, ErrProfileNotSupported) {
+		t.Fatalf("expected ErrProfileNotSupported when gateway returns extra unrequested host, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unexpected extra allowed host") {
+		t.Fatalf("expected error message to mention unexpected extra allowed host, got: %v", err)
+	}
+
+	// 15. Gateway returns allowed hosts when mode is none -> MUST FAIL CLOSED with ErrProfileNotSupported!
+	returnStatus = http.StatusOK
+	uuidNoneWithHosts := client.SessionIDToUUID("sess_none_extra")
+	customRespBody = fmt.Appendf(nil, `{"user_uuid":%q,"profile":"action-runtime","network":"none","allowed_hosts":["evil.com:443"],"status":"ready"}`, uuidNoneWithHosts)
+	_, err = client.CreateSession(ctx, SessionRequest{
+		SessionID: "sess_none_extra",
+		Profile:   ProfileRuntime,
+		Network: domain.NetworkPolicy{
+			Mode: domain.NetworkModeNone,
+		},
+	})
+	if err == nil || !errors.Is(err, ErrProfileNotSupported) {
+		t.Fatalf("expected ErrProfileNotSupported when gateway returns allowed hosts for network:none, got: %v", err)
+	}
 }
 
 func TestClient_ExportFiles_LimitEnforcement(t *testing.T) {
@@ -565,6 +604,86 @@ func TestClient_ExecEnvIsolation_DoesNotClobberContainerEnv(t *testing.T) {
 	}
 	if containsStr(executedCmd, "SESSION_VAR") {
 		t.Fatalf("session env must still not be injected, got: %s", executedCmd)
+	}
+}
+
+func TestClient_ExportFiles_CanonicalDeduplication_32to64MB(t *testing.T) {
+	ctx := context.Background()
+
+	const fileSize = 40 * 1024 * 1024 // 40 MiB canonical artifact (between 32 and 64 MiB)
+	const chunkSize = 524288          // 512 KiB per chunk
+	totalChunks := fileSize / chunkSize
+
+	chunkRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/shell/exec":
+			var req gatewayExecRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			w.Header().Set("Content-Type", "application/json")
+			exitCode := 0
+
+			if containsStr(req.Command, "if [ -f") {
+				// Both /sandbox/out/entrypoint and out/entrypoint resolve to canonical /sandbox/out/entrypoint
+				resp := gatewayExecResponse{
+					Stdout:   "/sandbox/out/entrypoint\n",
+					ExitCode: &exitCode,
+				}
+				_ = json.NewEncoder(w).Encode(resp)
+				return
+			}
+
+			// Chunk extraction
+			if chunkRequests < totalChunks {
+				chunkRequests++
+				// 512KB base64 chunk
+				rawChunk := make([]byte, chunkSize)
+				b64Str := base64.StdEncoding.EncodeToString(rawChunk)
+				resp := gatewayExecResponse{
+					Stdout:   b64Str + "\n",
+					ExitCode: &exitCode,
+				}
+				_ = json.NewEncoder(w).Encode(resp)
+			} else {
+				// EOF
+				resp := gatewayExecResponse{
+					Stdout:   "\n",
+					ExitCode: &exitCode,
+				}
+				_ = json.NewEncoder(w).Encode(resp)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		BaseURL:          server.URL,
+		AuthToken:        "tok",
+		SessionNamespace: "test",
+	})
+
+	// Requesting both canonical path and fallback path for a 40MB file:
+	// Without deduplication, 40MB + 40MB = 80MB would incorrectly exceed the 64MB limit!
+	exported, err := client.ExportFiles(ctx, "sess_dedup_test", []string{
+		"/sandbox/out/entrypoint",
+		"out/entrypoint",
+	})
+	if err != nil {
+		t.Fatalf("expected 40MB export to succeed with deduplication, got: %v", err)
+	}
+
+	if len(exported["/sandbox/out/entrypoint"]) != fileSize {
+		t.Fatalf("expected %d bytes for /sandbox/out/entrypoint, got %d", fileSize, len(exported["/sandbox/out/entrypoint"]))
+	}
+	if len(exported["out/entrypoint"]) != fileSize {
+		t.Fatalf("expected %d bytes for out/entrypoint, got %d", fileSize, len(exported["out/entrypoint"]))
+	}
+
+	// Ensure file was only read once across container chunks
+	if chunkRequests != totalChunks {
+		t.Fatalf("expected exactly %d chunk reads, got %d", totalChunks, chunkRequests)
 	}
 }
 

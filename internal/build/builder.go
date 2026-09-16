@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -155,18 +156,41 @@ func (b *Builder) BuildVersion(ctx context.Context, actionID, versionID string) 
 		return buildRecord, nil
 	}
 
-	// 7. Export built artifact files from /sandbox/out or /sandbox
-	exported, err := b.sandbox.ExportFiles(ctx, sessionID, []string{"/sandbox/out/entrypoint", "out/entrypoint", "entrypoint"})
-	if err != nil {
+	// 7. Export built artifact files from /sandbox/out or /sandbox using ordered candidate fallback
+	candidateFallbacks := []string{
+		"/sandbox/out/entrypoint",
+		"out/entrypoint",
+		"entrypoint",
+	}
+	var exported map[string][]byte
+	var lastExportErr error
+	for _, candidate := range candidateFallbacks {
+		exp, err := b.sandbox.ExportFiles(ctx, sessionID, []string{candidate})
+		if err != nil {
+			if errors.Is(err, sandbox.ErrArtifactTooLarge) {
+				lastExportErr = err
+				break
+			}
+			lastExportErr = err
+			continue
+		}
+		if len(exp) > 0 {
+			exported = exp
+			lastExportErr = nil
+			break
+		}
+	}
+
+	if lastExportErr != nil {
 		status := domain.BuildStatusFailed
 		buildRecord.Status = status
-		buildRecord.Stderr += fmt.Sprintf("\nfailed to export artifact: %v", err)
+		buildRecord.Stderr += fmt.Sprintf("\nfailed to export artifact: %v", lastExportErr)
 		_ = b.store.UpdateBuildResult(
 			ctx, buildID, status, toolchainVersion,
 			execRes.Stdout, buildRecord.Stderr, execRes.ExitCode,
 			"", "", 0, completedAt,
 		)
-		return buildRecord, fmt.Errorf("failed to export artifact: %w", err)
+		return buildRecord, fmt.Errorf("failed to export artifact: %w", lastExportErr)
 	}
 	if len(exported) == 0 {
 		status := domain.BuildStatusFailed

@@ -29,6 +29,10 @@ func NewFileStore(dataDir string) *FileStore {
 	return &FileStore{dataDir: dataDir}
 }
 
+func (f *FileStore) DataDir() string {
+	return f.dataDir
+}
+
 // StageSourceBundle writes source files into an isolated staging directory, calculates the SHA256 digest,
 // and returns the digest and a temporary stageToken.
 func (f *FileStore) StageSourceBundle(actionID string, files map[string][]byte) (string, string, error) {
@@ -89,6 +93,9 @@ func (f *FileStore) CommitSourceBundle(actionID, stageToken, versionID string) (
 		return "", fmt.Errorf("failed to ensure versions dir: %w", err)
 	}
 
+	// Remove existing destination directory (if any exists from an uncommitted crash) to ensure rename succeeds
+	_ = os.RemoveAll(destVersionDir)
+
 	if err := os.Rename(stagedVersionDir, destVersionDir); err != nil {
 		return "", fmt.Errorf("failed to atomically commit source bundle: %w", err)
 	}
@@ -97,6 +104,31 @@ func (f *FileStore) CommitSourceBundle(actionID, stageToken, versionID string) (
 	_ = os.Remove(filepath.Join(f.dataDir, "actions", actionID, "staging"))
 
 	return relDir, nil
+}
+
+// DeleteSourceBundle removes a committed source bundle if subsequent database operations fail or for cleanup.
+func (f *FileStore) DeleteSourceBundle(actionID, versionID string) error {
+	destVersionDir := filepath.Join(f.dataDir, "actions", actionID, "versions", versionID)
+	return os.RemoveAll(destVersionDir)
+}
+
+// ListStoredVersionIDs returns all version directory names currently on disk for an action.
+func (f *FileStore) ListStoredVersionIDs(actionID string) ([]string, error) {
+	versionsDir := filepath.Join(f.dataDir, "actions", actionID, "versions")
+	entries, err := os.ReadDir(versionsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var ids []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			ids = append(ids, entry.Name())
+		}
+	}
+	return ids, nil
 }
 
 // DiscardSourceBundle removes a staged source bundle if version creation fails.

@@ -429,3 +429,67 @@ func TestBuildLifecycle_ArtifactTooLarge_FailsCleanly(t *testing.T) {
 	}
 }
 
+func TestBuildLifecycle_ArtifactBetween32And64MB_Succeeds(t *testing.T) {
+	ctx := context.Background()
+	st, _, sb, actSvc, builder := setupTestEnvironment(t)
+
+	act, err := actSvc.CreateAction(ctx, action.CreateActionRequest{
+		Name: "Valid Large Artifact Action",
+	})
+	if err != nil {
+		t.Fatalf("create action: %v", err)
+	}
+
+	ver, err := actSvc.CreateVersion(ctx, act.ID, action.CreateVersionRequest{
+		Files: map[string][]byte{
+			"main.go": []byte("package main\nfunc main() {}\n"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create version: %v", err)
+	}
+
+	// 40 MiB artifact - between 32 MiB and 64 MiB
+	const artifactSize = 40 * 1024 * 1024
+	sb.CustomExec = func(req sandbox.ExecRequest, session *sandbox.FakeSession) (sandbox.ExecResult, error) {
+		zero := 0
+		if strings.Contains(req.Command, "go version") {
+			return sandbox.ExecResult{
+				Stdout:   "go version go1.27.3 linux/amd64\n",
+				ExitCode: &zero,
+			}, nil
+		}
+		if strings.Contains(req.Command, "go build") {
+			// Simulate producing /sandbox/out/entrypoint of 40 MiB
+			session.Files["/sandbox/out/entrypoint"] = make([]byte, artifactSize)
+			session.Files["entrypoint"] = session.Files["/sandbox/out/entrypoint"]
+			return sandbox.ExecResult{
+				Stdout:   "build succeeded\n",
+				ExitCode: &zero,
+			}, nil
+		}
+		return sandbox.ExecResult{ExitCode: &zero}, nil
+	}
+
+	buildRecord, err := builder.BuildVersion(ctx, act.ID, ver.ID)
+	if err != nil {
+		t.Fatalf("expected 40MB build to succeed, got error: %v", err)
+	}
+
+	if buildRecord.Status != domain.BuildStatusSucceeded {
+		t.Fatalf("expected build status succeeded, got %s: %s", buildRecord.Status, buildRecord.Stderr)
+	}
+	if buildRecord.ArtifactSize != artifactSize {
+		t.Fatalf("expected artifact size %d, got %d", artifactSize, buildRecord.ArtifactSize)
+	}
+
+	// Verify record in SQLite store
+	dbBuild, err := st.GetBuild(ctx, buildRecord.ID)
+	if err != nil {
+		t.Fatalf("failed to retrieve build from db: %v", err)
+	}
+	if dbBuild.Status != domain.BuildStatusSucceeded {
+		t.Fatalf("expected db status succeeded, got %s", dbBuild.Status)
+	}
+}
+

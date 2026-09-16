@@ -6,6 +6,7 @@ import (
 	"actionscat/internal/store"
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -187,5 +188,99 @@ func TestActionService_CreateVersion_Concurrent_DigestConsistent(t *testing.T) {
 		if string(readFiles["main.go"]) != payloads[i] {
 			t.Fatalf("disk payload corrupted for version %s: expected %q, got %q", v.ID, payloads[i], string(readFiles["main.go"]))
 		}
+	}
+}
+
+func TestActionService_CreateVersion_DBFailure_RollsBackFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	db, err := store.OpenDB(filepath.Join(tempDir, "test.db"))
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+
+	st := store.NewSQLiteStore(db)
+	fs := store.NewFileStore(tempDir)
+	sb := sandbox.NewFakeBackend()
+	svc := NewService(st, fs, sb)
+
+	ctx := context.Background()
+	act, err := svc.CreateAction(ctx, CreateActionRequest{Name: "Rollback Action"})
+	if err != nil {
+		t.Fatalf("create action: %v", err)
+	}
+
+	// Close database to trigger guaranteed failure during CreateVersion DB insertion
+	_ = db.Close()
+
+	expectedVerID := fmt.Sprintf("ver_%s_%06d", act.ID, 1)
+	_, err = svc.CreateVersion(ctx, act.ID, CreateVersionRequest{
+		Files: map[string][]byte{"main.go": []byte("package main\n")},
+	})
+	if err == nil {
+		t.Fatal("expected CreateVersion to fail when DB is closed")
+	}
+
+	// Verify that committed files were rolled back and no corrupted files remain on disk!
+	_, err = fs.ReadSourceBundle(act.ID, expectedVerID)
+	if err == nil {
+		t.Fatalf("security violation: expected source bundle for %s to be rolled back, but it exists on disk", expectedVerID)
+	}
+
+	// Also verify no staging files remain
+	stagingDir := filepath.Join(tempDir, "actions", act.ID, "staging")
+	entries, _ := os.ReadDir(stagingDir)
+	if len(entries) > 0 {
+		t.Fatalf("expected staging directory to be cleaned, found %d entries", len(entries))
+	}
+}
+
+func TestActionService_CreateVersion_CrashRecovery_OrphanCleanedAndOverwritten(t *testing.T) {
+	ctx := context.Background()
+	_, fs, _, svc := setupActionTest(t)
+
+	act, err := svc.CreateAction(ctx, CreateActionRequest{Name: "Crash Action"})
+	if err != nil {
+		t.Fatalf("create action: %v", err)
+	}
+
+	// Simulate an orphaned version on disk left by a previous crash before DB insertion
+	orphanVerID := fmt.Sprintf("ver_%s_%06d", act.ID, 1)
+	orphanDir := filepath.Join(fs.DataDir(), "actions", act.ID, "versions", orphanVerID, "source")
+	if err := os.MkdirAll(orphanDir, 0750); err != nil {
+		t.Fatalf("mkdir orphan: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanDir, "stale.go"), []byte("stale-corrupted-code"), 0644); err != nil {
+		t.Fatalf("write stale: %v", err)
+	}
+
+	// Verify CleanOrphanedVersions finds and cleans the orphaned version directory
+	cleaned, err := svc.CleanOrphanedVersions(ctx, act.ID)
+	if err != nil {
+		t.Fatalf("clean orphans: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expected 1 orphan cleaned, got %d", cleaned)
+	}
+
+	// Creating Version 1 now must succeed cleanly and contain only the new files
+	v1, err := svc.CreateVersion(ctx, act.ID, CreateVersionRequest{
+		Files: map[string][]byte{"main.go": []byte("package main // fresh valid code\n")},
+	})
+	if err != nil {
+		t.Fatalf("create version 1 after recovery: %v", err)
+	}
+	if v1.VersionNumber != 1 {
+		t.Fatalf("expected version number 1, got %d", v1.VersionNumber)
+	}
+
+	readFiles, err := fs.ReadSourceBundle(act.ID, v1.ID)
+	if err != nil {
+		t.Fatalf("read source bundle: %v", err)
+	}
+	if string(readFiles["main.go"]) != "package main // fresh valid code\n" {
+		t.Fatalf("unexpected content: %s", string(readFiles["main.go"]))
+	}
+	if _, hasStale := readFiles["stale.go"]; hasStale {
+		t.Fatal("stale file from previous crash was not purged!")
 	}
 }
