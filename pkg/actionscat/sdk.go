@@ -105,6 +105,7 @@ type MessageItem struct {
 	MessageID     string `json:"message_id,omitempty"`
 	URL           string `json:"url,omitempty"`
 	Path          string `json:"path,omitempty"`
+	IsSticker     bool   `json:"is_sticker,omitempty"`
 }
 
 // SendMessageRequest carries canonical routing and message content for FrostAgent delivery.
