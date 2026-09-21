@@ -24,6 +24,11 @@ Thumbs.db
 *.db
 /data/
 
+# Environment files
+.env
+.env.*
+!.env.example
+
 # Claude
 .claude/
 

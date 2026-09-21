@@ -85,17 +85,28 @@ actionscat/
 go build -o actionscat.exe ./cmd/core
 ```
 
-### 2. 启动服务
+### 2. 启动服务与环境变量配置
+
+ActionsCat Core 首次启动时会在根目录自动检测并生成默认 `.env` 配置文件（包含完整的默认值与配置说明注释），随后自动读取并注入进程环境变量（已有系统环境变量优先，不会被覆盖）。
 
 ```powershell
-# 可选环境变量配置
-$env:ACTIONSCAT_ADDR = ":7999"
-$env:ACTIONSCAT_DATA_DIR = "./data"
-$env:FA_SANDBOX_ENDPOINT = "http://127.0.0.1:3874"
-$env:FROSTAGENT_ENDPOINT = "http://127.0.0.1:8000"
+# 首次运行自动生成并读取 .env
+./actionscat.exe
 
+# 也可通过系统环境变量或指定自定义 env 文件
+$env:ACTIONSCAT_ENV_FILE = "./custom.env"
 ./actionscat.exe
 ```
+
+参考配置模板可查阅根目录下提交的 `.env.example`。常见核心配置项：
+- `ACTIONSCAT_ADDR`: HTTP 监听地址（默认 `:7999`）
+- `ACTIONSCAT_DATA_DIR`: 数据与状态持久化目录（默认 `./data`）
+- `ACTIONSCAT_DB_PATH`: SQLite 数据库路径（默认 `./data/actionscat.db`）
+- `ACTIONSCAT_RUNNER_WORKERS`: 执行器并发工作协程数（默认 `8`）
+- `ACTIONSCAT_MANAGEMENT_TOKEN`: 管理 API Bearer Token（保护管理端点）
+- `ACTIONSCAT_DISPATCH_TOKEN`: 消息分发 Ingress Token（保护 `/api/v1/dispatch`）
+- `FA_SANDBOX_ENDPOINT`: 沙箱 Gateway / Code Interpreter 地址（默认 `http://127.0.0.1:3874`）
+- `FROSTAGENT_ENDPOINT`: FrostAgent 主端点地址（默认 `http://127.0.0.1:8000`）
 
 ---
 

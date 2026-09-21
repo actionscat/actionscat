@@ -2,6 +2,7 @@ package main
 
 import (
 	"actionscat/internal/api"
+	"actionscat/internal/config"
 	"actionscat/internal/frostagent"
 	"actionscat/internal/sandbox"
 	"actionscat/internal/store"
@@ -17,6 +18,14 @@ import (
 )
 
 func main() {
+	if res, err := config.SetupEnv(); err != nil {
+		log.Printf("[config] warning: failed to initialize .env file: %v", err)
+	} else if res.Created {
+		log.Printf("[config] generated default .env file at %s", res.Path)
+	} else if res.Loaded {
+		log.Printf("[config] loaded %d environment variables from %s", res.LoadedVars, res.Path)
+	}
+
 	addr := os.Getenv("ACTIONSCAT_ADDR")
 	if addr == "" {
 		addr = ":7999"
@@ -49,9 +58,13 @@ func main() {
 	if sandboxEndpoint == "" {
 		sandboxEndpoint = "http://127.0.0.1:3874"
 	}
+	sandboxAPIKey := os.Getenv("FA_SANDBOX_API_KEY")
+	if sandboxAPIKey == "" {
+		sandboxAPIKey = os.Getenv("FA_SANDBOX_AUTH_TOKEN")
+	}
 	sandboxBackend := sandbox.NewClient(sandbox.Config{
 		BaseURL:   sandboxEndpoint,
-		AuthToken: os.Getenv("FA_SANDBOX_API_KEY"),
+		AuthToken: sandboxAPIKey,
 	})
 
 	faEndpoint := os.Getenv("FROSTAGENT_ENDPOINT")
