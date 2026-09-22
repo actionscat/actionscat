@@ -687,6 +687,114 @@ func TestClient_ExportFiles_CanonicalDeduplication_32to64MB(t *testing.T) {
 	}
 }
 
+func TestClient_Release_StrictParity(t *testing.T) {
+	ctx := context.Background()
+
+	var releaseStatus int
+	var releaseBody string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/status":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/api/v1/sessions":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			var req map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"user_uuid": req["user_uuid"],
+				"profile":   req["profile"],
+				"network":   req["network"],
+				"status":    "ready",
+			})
+		case "/api/v1/release":
+			w.WriteHeader(releaseStatus)
+			if releaseBody != "" {
+				_, _ = w.Write([]byte(releaseBody))
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		BaseURL:          server.URL,
+		AuthToken:        "tok",
+		SessionNamespace: "release-test",
+	})
+
+	initSession := func(sessionID string) {
+		_, err := client.CreateSession(ctx, SessionRequest{
+			SessionID: sessionID,
+			Profile:   ProfileRuntime,
+		})
+		if err != nil {
+			t.Fatalf("setup CreateSession failed: %v", err)
+		}
+		if !client.HasSession(sessionID) {
+			t.Fatalf("expected client to have session metadata for %s", sessionID)
+		}
+	}
+
+	// 1. HTTP 200 OK -> release succeeds and deletes local metadata
+	initSession("sess_200")
+	releaseStatus = http.StatusOK
+	releaseBody = `{"status":"released"}`
+	if err := client.Release(ctx, "sess_200"); err != nil {
+		t.Fatalf("expected Release to succeed on 200 OK, got: %v", err)
+	}
+	if client.HasSession("sess_200") {
+		t.Fatal("expected local metadata to be deleted after 200 OK release")
+	}
+
+	// 2. HTTP 204 No Content -> release succeeds and deletes local metadata
+	initSession("sess_204")
+	releaseStatus = http.StatusNoContent
+	releaseBody = ""
+	if err := client.Release(ctx, "sess_204"); err != nil {
+		t.Fatalf("expected Release to succeed on 204 No Content, got: %v", err)
+	}
+	if client.HasSession("sess_204") {
+		t.Fatal("expected local metadata to be deleted after 204 No Content release")
+	}
+
+	// 3. HTTP 404 with machine-readable session_not_found -> release succeeds (idempotent) and deletes local metadata
+	initSession("sess_404_found")
+	releaseStatus = http.StatusNotFound
+	releaseBody = `{"code":"session_not_found","message":"Session not found on worker"}`
+	if err := client.Release(ctx, "sess_404_found"); err != nil {
+		t.Fatalf("expected Release to succeed on 404 with session_not_found body, got: %v", err)
+	}
+	if client.HasSession("sess_404_found") {
+		t.Fatal("expected local metadata to be deleted after machine-readable 404 release")
+	}
+
+	// 4. HTTP 404 with generic router 404 -> MUST FAIL and PRESERVE local metadata!
+	initSession("sess_404_generic")
+	releaseStatus = http.StatusNotFound
+	releaseBody = `404 page not found`
+	if err := client.Release(ctx, "sess_404_generic"); err == nil {
+		t.Fatal("expected Release to fail on generic 404, got nil")
+	}
+	if !client.HasSession("sess_404_generic") {
+		t.Fatal("expected local metadata to be PRESERVED on generic 404 release failure")
+	}
+
+	// 5. HTTP 500 Server Error -> MUST FAIL and PRESERVE local metadata!
+	initSession("sess_500")
+	releaseStatus = http.StatusInternalServerError
+	releaseBody = `{"error":"internal server error"}`
+	if err := client.Release(ctx, "sess_500"); err == nil {
+		t.Fatal("expected Release to fail on HTTP 500, got nil")
+	}
+	if !client.HasSession("sess_500") {
+		t.Fatal("expected local metadata to be PRESERVED on HTTP 500 release failure")
+	}
+}
+
 func containsStr(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || (len(s) > len(sub) && (s[:len(sub)] == sub || containsStr(s[1:], sub))))
 }

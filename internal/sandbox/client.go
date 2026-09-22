@@ -527,15 +527,60 @@ func (c *Client) ExportFiles(ctx context.Context, sessionID string, paths []stri
 	return out, nil
 }
 
+// HasSession returns true if the client currently holds local session metadata for sessionID.
+func (c *Client) HasSession(sessionID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	_, exists := c.sessions[sessionID]
+	return exists
+}
+
+// isSessionNotFoundBody checks if an HTTP response body (e.g. HTTP 404) explicitly indicates
+// that the release endpoint exists and the session was not found / already released.
+// Generic router 404 responses (such as "404 page not found") do not match.
+func isSessionNotFoundBody(body string) bool {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return false
+	}
+
+	var jsonMap map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &jsonMap); err == nil {
+		for _, key := range []string{"code", "error", "detail", "message", "status"} {
+			if val, ok := jsonMap[key]; ok {
+				if s, ok := val.(string); ok {
+					lower := strings.ToLower(s)
+					if lower == "session_not_found" ||
+						lower == "session_missing" ||
+						lower == "no_active_session" ||
+						lower == "session_expired" ||
+						lower == "session_evicted" ||
+						lower == "session_not_provisioned" ||
+						strings.Contains(lower, "session not found") ||
+						strings.Contains(lower, "no active session") ||
+						strings.Contains(lower, "session has expired") ||
+						strings.Contains(lower, "session was evicted") ||
+						strings.Contains(lower, "session missing") {
+						return true
+					}
+				}
+			}
+		}
+	}
+
+	lower := strings.ToLower(trimmed)
+	return strings.Contains(lower, "session_not_found") ||
+		strings.Contains(lower, "session not found") ||
+		strings.Contains(lower, "no active session") ||
+		strings.Contains(lower, "session expired") ||
+		strings.Contains(lower, "session evicted")
+}
+
 func (c *Client) Release(ctx context.Context, sessionID string) error {
 	if strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
 	userUUID := c.SessionIDToUUID(sessionID)
-
-	c.mu.Lock()
-	delete(c.sessions, sessionID)
-	c.mu.Unlock()
 
 	releaseURL, err := url.Parse(c.baseURL + "/api/v1/release")
 	if err != nil {
@@ -558,10 +603,20 @@ func (c *Client) Release(ctx context.Context, sessionID string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
+		c.mu.Lock()
+		delete(c.sessions, sessionID)
+		c.mu.Unlock()
 		return nil
 	}
 	if resp.StatusCode == http.StatusNotFound {
-		return nil // idempotent release
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if isSessionNotFoundBody(string(errBody)) {
+			c.mu.Lock()
+			delete(c.sessions, sessionID)
+			c.mu.Unlock()
+			return nil
+		}
+		return fmt.Errorf("gateway returned generic 404 on release: %s", string(errBody))
 	}
 
 	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
